@@ -19,12 +19,12 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstring>
 #include <functional>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <stdlib.h>
+#include <string>
 #include <initializer_list>
 
 #include "dnnl.hpp"
@@ -56,17 +56,7 @@
 #define PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(n)
 #endif
 
-dnnl::engine::kind validate_engine_kind(dnnl::engine::kind akind) {
-    // Checking if a GPU exists on the machine
-    if (akind == dnnl::engine::kind::gpu) {
-        if (dnnl::engine::get_count(dnnl::engine::kind::gpu) == 0) {
-            std::cout << "Application couldn't find GPU, please run with CPU "
-                         "instead.\n";
-            exit(0);
-        }
-    }
-    return akind;
-}
+dnnl::engine::kind validate_engine_kind(dnnl::engine::kind akind);
 
 // Exception class to indicate that the example uses a feature that is not
 // available on the current systems. It is not treated as an error then, but
@@ -131,7 +121,7 @@ inline int handle_example_errors(
 }
 
 inline dnnl::engine::kind parse_engine_kind(
-        int argc, char **argv, int extra_args = 0) {
+        int argc, char **argv, int extra_args) {
     // Returns default engine kind, i.e. CPU, if none given
     if (argc == 1) {
         return validate_engine_kind(dnnl::engine::kind::cpu);
@@ -180,7 +170,7 @@ inline void read_from_dnnl_memory(void *handle, dnnl::memory &mem) {
         auto mkind = dnnl::sycl_interop::get_memory_kind(mem);
         if (mkind == dnnl::sycl_interop::memory_kind::buffer) {
             auto buffer = dnnl::sycl_interop::get_buffer<uint8_t>(mem);
-            auto src = buffer.get_access<::sycl::access::mode::read>();
+            auto src = buffer.get_access<cl::sycl::access::mode::read>();
             uint8_t *src_ptr = src.get_pointer();
             if (!src_ptr)
                 throw std::runtime_error("get_pointer returned nullptr.");
@@ -205,9 +195,14 @@ inline void read_from_dnnl_memory(void *handle, dnnl::memory &mem) {
 #endif
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
     if (eng.get_kind() == dnnl::engine::kind::gpu) {
-        void *mapped_ptr = mem.map_data();
-        if (mapped_ptr) std::memcpy(handle, mapped_ptr, size);
-        mem.unmap_data(mapped_ptr);
+        dnnl::stream s(eng);
+        cl_command_queue q = dnnl::ocl_interop::get_command_queue(s);
+        cl_mem m = dnnl::ocl_interop::get_mem_object(mem);
+
+        cl_int ret = clEnqueueReadBuffer(
+                q, m, CL_TRUE, 0, size, handle, 0, NULL, NULL);
+        if (ret != CL_SUCCESS)
+            throw std::runtime_error("clEnqueueReadBuffer failed.");
         return;
     }
 #endif
@@ -239,7 +234,7 @@ inline void write_to_dnnl_memory(void *handle, dnnl::memory &mem) {
         auto mkind = dnnl::sycl_interop::get_memory_kind(mem);
         if (mkind == dnnl::sycl_interop::memory_kind::buffer) {
             auto buffer = dnnl::sycl_interop::get_buffer<uint8_t>(mem);
-            auto dst = buffer.get_access<::sycl::access::mode::write>();
+            auto dst = buffer.get_access<cl::sycl::access::mode::write>();
             uint8_t *dst_ptr = dst.get_pointer();
             if (!dst_ptr)
                 throw std::runtime_error("get_pointer returned nullptr.");
@@ -264,9 +259,14 @@ inline void write_to_dnnl_memory(void *handle, dnnl::memory &mem) {
 #endif
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
     if (eng.get_kind() == dnnl::engine::kind::gpu) {
-        void *mapped_ptr = mem.map_data();
-        if (mapped_ptr) std::memcpy(mapped_ptr, handle, size);
-        mem.unmap_data(mapped_ptr);
+        dnnl::stream s(eng);
+        cl_command_queue q = dnnl::ocl_interop::get_command_queue(s);
+        cl_mem m = dnnl::ocl_interop::get_mem_object(mem);
+
+        cl_int ret = clEnqueueWriteBuffer(
+                q, m, CL_TRUE, 0, size, handle, 0, NULL, NULL);
+        if (ret != CL_SUCCESS)
+            throw std::runtime_error("clEnqueueWriteBuffer failed.");
         return;
     }
 #endif
@@ -281,5 +281,6 @@ inline void write_to_dnnl_memory(void *handle, dnnl::memory &mem) {
 
     assert(!"not expected");
 }
+
 
 #endif
