@@ -18,6 +18,8 @@
 using namespace dnnl;
 
 // #define DEBUG
+#define MODIFY
+// #define USEREORDER
 
 const std::string MNIST_DATA_LOCATION = "/home/cauchy/github/mnist-fashion/data/mnist";
 const std::string MNIST_FASHION_DATA_LOCATION = "/home/cauchy/github/mnist-fashion/data/fashion";
@@ -29,10 +31,108 @@ mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
 memory::dim train_t = 0;
 memory::dim test_t = 0;
 
+using tag = memory::format_tag;
+using dt = memory::data_type;
+
+class Conv2DwithReLu {
+public:
+    Conv2DwithReLu(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory, const memory::dims &src_tz,
+            const memory::dims &dst_tz,
+            const memory::dims &weights_tz,
+            const memory::dims &strides, const memory::dims &padding,
+            const float &negative_slope);
+    ~Conv2DwithReLu() = default;
+    Conv2DwithReLu(const Conv2DwithReLu &obj) = delete; // ban copying to avoid some bugs
+    memory dst_memory() { return dst_m; }
+
+private:
+    std::vector<float> weights;
+    std::vector<float> bias;
+    memory dst_m;
+    // memory *user_weights_memory_p, *user_bias_memory_p;
+    // md *src_md_p, *bias_md_p, *weights_md_p, *dst_md_p;
+    // convolution_forward::desc *desc_p;
+    // convolution_forward::primitive_desc *pd_p;
+    // memory *weights_memory_p, *bias_memory_p;
+};
+
+class MaxPooling {
+public:
+    MaxPooling(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory,
+            const memory::dims &kernel,
+            const memory::dims &dst_tz, const memory::dims &strides,
+            const memory::dims &padding, bool trained = true);
+    ~MaxPooling() = default;
+    MaxPooling(const MaxPooling &obj) = delete; // ban copying to avoid some bugs
+    memory dst_memory() { return dst_m; }
+private:
+    bool iftrain;
+    memory dst_m;
+};
+
+class Dense {
+public:
+    Dense(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory, const memory::dims &src_tz,
+            const memory::dims &dst_tz,
+            const memory::dims &weights_tz);
+    ~Dense() = default;
+    Dense(const Dense &obj) = delete;
+    memory dst_memory() { return dst_m; }
+
+private:
+    std::vector<float> weights;
+    std::vector<float> bias;
+    memory dst_m;
+};
+
+class ReLU {
+public:
+    ReLU(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory, const float &negative_slope)
+    {
+        auto desc = eltwise_forward::desc(prop_kind::forward,
+                algorithm::eltwise_relu, src_memory.get_desc(),
+                negative_slope);
+        auto pd = eltwise_forward::primitive_desc(desc, eng);
+
+        // create relu dst memory
+        auto dst_memory = memory(pd.dst_desc(), eng);
+
+        net.push_back(eltwise_forward(pd));
+        net_args.push_back({{DNNL_ARG_SRC, src_memory},
+                {DNNL_ARG_DST, dst_memory}});
+        dst_m = dst_memory;
+    }
+
+    ~ReLU() = default;
+    ReLU(const ReLU &obj) = delete;
+    memory dst_memory() { return dst_m; }
+
+private:
+    memory dst_m;
+};
+
+class CrossEntropyLoss {
+public:
+    CrossEntropyLoss(dnnl::engine eng, std::vector<primitive> &net,
+                            std::vector<std::unordered_map<int, memory>> &net_args,
+                            const memory &y_hat, const memory &y_true,
+                            const memory::dims &y_tz);
+    ~CrossEntropyLoss() = default;
+    CrossEntropyLoss(const CrossEntropyLoss &obj);
+private:
+
+};
 
 void VGG11(engine::kind engine_kind) {
-    using tag = memory::format_tag;
-    using dt = memory::data_type;
+
 
     auto eng = engine(engine_kind, 0);
     stream s(eng);
@@ -82,16 +182,267 @@ void VGG11(engine::kind engine_kind) {
         net_dst[i*10 + ans] = 1;
     }
 
+    auto net_dst_memory = memory({{memory::dims{N, 10}}, dt::f32, tag::nc}, eng);
+    write_to_dnnl_memory(net_dst.data(), net_dst_memory);
+
+    const float negative_slope = 0.0f;
+
     // VGG11: block 1-1: conv1
     // {batch, 3, 224, 224} (x) {64, 3, 3, 3} -> {batch, 64, 224, 224}
     // kernel: {3,3}; strides: {1, 1}; padding: {1, 1}
     memory::dims conv1_src_tz = {N, 3, 224, 224};
     memory::dims conv1_weights_tz = {64, 3, 3, 3};
-    memory::dims conv1_bias_tz = {64};
     memory::dims conv1_dst_tz = {N, 64, 224, 224};
     memory::dims conv1_strides = {1, 1};
     memory::dims conv1_padding = {1, 1};
 
+    auto conv1_src_memory
+            = memory({{conv1_src_tz}, dt::f32, tag::nchw}, eng);
+    write_to_dnnl_memory(net_src.data(), conv1_src_memory);
+
+    Conv2DwithReLu conv1(eng, net_fwd, net_fwd_args,
+                conv1_src_memory, conv1_src_tz,
+                conv1_dst_tz, conv1_weights_tz,
+                conv1_strides, conv1_padding, negative_slope);
+    memory conv1_dst_memory = conv1.dst_memory();
+
+    // VGG11: block 1-2: max_pooling1
+    // {batch, 64, 224, 224} -> {batch, 64, 112, 112}
+    // kernel: {2, 2}
+    // strides: {2, 2}
+    memory::dims pool1_dst_tz = {N, 64, 112, 112};
+    memory::dims pool1_kernel = {2, 2};
+    memory::dims pool1_strides = {2, 2};
+    memory::dims pool1_padding = {0, 0};
+    MaxPooling pool1(eng, net_fwd, net_fwd_args,
+                conv1_dst_memory,
+                pool1_kernel, pool1_dst_tz,
+                pool1_strides, pool1_padding);
+    memory pool1_dst_memory = pool1.dst_memory();
+
+    // VGG11: block 2-1: conv2
+    // {batch, 64, 112, 112} -> {batch, 128, 112, 112}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv2_src_tz = {N, 64, 112, 112};
+    memory::dims conv2_weights_tz = {128, 64, 3, 3};
+    memory::dims conv2_dst_tz = {N, 128, 112, 112};
+    memory::dims conv2_strides = {1, 1};
+    memory::dims conv2_padding = {1, 1};
+    Conv2DwithReLu conv2(eng, net_fwd, net_fwd_args,
+                pool1_dst_memory, conv2_src_tz,
+                conv2_dst_tz, conv2_weights_tz,
+                conv2_strides, conv2_padding, negative_slope);
+    memory conv2_dst_memory = conv2.dst_memory();
+
+    // VGG11: block 2-2 max_pooling2
+    // {batch, 128, 112, 112} -> {batch, 128, 56, 56}
+    // kernel: {2, 2}; strides: {2, 2}; padding: {0, 0}
+    memory::dims pool2_dst_tz = {N, 128, 56, 56};
+    memory::dims pool2_kernel = {2, 2};
+    memory::dims pool2_strides = {2, 2};
+    memory::dims pool2_padding = {0, 0};
+    MaxPooling pool2(eng, net_fwd, net_fwd_args,
+                conv2_dst_memory,
+                pool2_kernel, pool2_dst_tz,
+                pool2_strides, pool2_padding);
+    memory pool2_dst_memory = pool2.dst_memory();
+
+    // VGG11: block 3-1: conv3
+    // {batch, 128, 56, 56} -> {batch, 256, 56, 56}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv3_src_tz = {N, 128, 56, 56};
+    memory::dims conv3_weights_tz = {256, 128, 3, 3};
+    memory::dims conv3_dst_tz = {N, 256, 56, 56};
+    memory::dims conv3_strides = {1, 1};
+    memory::dims conv3_padding = {1, 1};
+    Conv2DwithReLu conv3(eng, net_fwd, net_fwd_args,
+                pool2_dst_memory, conv3_src_tz,
+                conv3_dst_tz, conv3_weights_tz,
+                conv3_strides, conv3_padding, negative_slope);
+    memory conv3_dst_memory = conv3.dst_memory();
+
+    // VGG11: block 3-2: conv4
+    // {batch, 256, 56, 56} -> {batch, 256, 56, 56}
+    memory::dims conv4_src_tz = {N, 256, 56, 56};
+    memory::dims conv4_weights_tz = {256, 256, 3, 3};
+    memory::dims conv4_dst_tz = {N, 256, 56, 56};
+    memory::dims conv4_strides = {1, 1};
+    memory::dims conv4_padding = {1, 1};
+    Conv2DwithReLu conv4(eng, net_fwd, net_fwd_args,
+                conv3_dst_memory, conv4_src_tz,
+                conv4_dst_tz, conv4_weights_tz,
+                conv4_strides, conv4_padding, negative_slope);
+    memory conv4_dst_memory = conv4.dst_memory();
+
+    // VGG11: block 3-3: max_pooling3
+    // {batch, 256, 56, 56} -> {batch, 256, 28, 28}
+    // kernel: {2, 2}; strides: {2, 2}; padding: {1, 1}
+    memory::dims pool3_dst_tz = {N, 256, 28, 28};
+    memory::dims pool3_kernel = {2, 2};
+    memory::dims pool3_strides = {2, 2};
+    memory::dims pool3_padding = {0, 0};
+    MaxPooling pool3(eng, net_fwd, net_fwd_args,
+                conv4_dst_memory,
+                pool3_kernel, pool3_dst_tz,
+                pool3_strides, pool3_padding);
+    memory pool3_dst_memory = pool3.dst_memory();
+
+    // VGG11: block 4-1: conv5
+    // {batch, 256, 28, 28} -> {batch, 512, 28, 28}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv5_src_tz = {N, 256, 28, 28};
+    memory::dims conv5_weights_tz = {512, 256, 3, 3};
+    memory::dims conv5_dst_tz = {N, 512, 28, 28};
+    memory::dims conv5_strides = {1, 1};
+    memory::dims conv5_padding = {1, 1};
+    Conv2DwithReLu conv5(eng, net_fwd, net_fwd_args,
+                pool3_dst_memory, conv5_src_tz,
+                conv5_dst_tz, conv5_weights_tz,
+                conv5_strides, conv5_padding, negative_slope);
+    memory conv5_dst_memory = conv5.dst_memory();
+
+    // VGG11: block 4-2: conv6
+    // {batch, 512, 28, 28} -> {batch, 512, 28, 28}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv6_src_tz = {N, 512, 28, 28};
+    memory::dims conv6_weights_tz = {512, 512, 3, 3};
+    memory::dims conv6_dst_tz = {N, 512, 28, 28};
+    memory::dims conv6_strides = {1, 1};
+    memory::dims conv6_padding = {1, 1};
+    Conv2DwithReLu conv6(eng, net_fwd, net_fwd_args,
+                conv5_dst_memory, conv6_src_tz,
+                conv6_dst_tz, conv6_weights_tz,
+                conv6_strides, conv6_padding, negative_slope);
+    memory conv6_dst_memory = conv6.dst_memory();
+
+    // VGG11: block 4-3: max_pooling4
+    // {batch, 512, 28, 28} -> {batch, 512, 14, 14}
+    // kernel: {2, 2}; strides: {2, 2}; padding: {1, 1}
+    memory::dims pool4_dst_tz = {N, 512, 14, 14};
+    memory::dims pool4_kernel = {2, 2};
+    memory::dims pool4_strides = {2, 2};
+    memory::dims pool4_padding = {0, 0};
+    MaxPooling pool4(eng, net_fwd, net_fwd_args,
+                conv6_dst_memory,
+                pool4_kernel, pool4_dst_tz,
+                pool4_strides, pool4_padding);
+    memory pool4_dst_memory = pool4.dst_memory();
+
+    // VGG11: block 5-1: conv7
+    // {batch, 512, 14, 14} -> {batch, 512, 14, 14}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv7_src_tz = {N, 512, 14, 14};
+    memory::dims conv7_weights_tz = {512, 512, 3, 3};
+    memory::dims conv7_dst_tz = {N, 512, 14, 14};
+    memory::dims conv7_strides = {1, 1};
+    memory::dims conv7_padding = {1, 1};
+    Conv2DwithReLu conv7(eng, net_fwd, net_fwd_args,
+                pool4_dst_memory, conv7_src_tz,
+                conv7_dst_tz, conv7_weights_tz,
+                conv7_strides, conv7_padding, negative_slope);
+    memory conv7_dst_memory = conv7.dst_memory();
+
+    // VGG11: block 5-2: conv8
+    // {batch, 512, 14, 14} -> {batch, 512, 14, 14}
+    // kernel: {3, 3}; strides: {1, 1}; padding: {1, 1}
+    memory::dims conv8_src_tz = {N, 512, 14, 14};
+    memory::dims conv8_weights_tz = {512, 512, 3, 3};
+    memory::dims conv8_dst_tz = {N, 512, 14, 14};
+    memory::dims conv8_strides = {1, 1};
+    memory::dims conv8_padding = {1, 1};
+    Conv2DwithReLu conv8(eng, net_fwd, net_fwd_args,
+                conv7_dst_memory, conv8_src_tz,
+                conv8_dst_tz, conv8_weights_tz,
+                conv8_strides, conv8_padding, negative_slope);
+    memory conv8_dst_memory = conv8.dst_memory();
+
+    // VGG11: block 5-3: max_pooling5
+    // {batch, 512, 14, 14} -> {batch, 512, 7, 7}
+    // kernel: {2, 2}; strides: {2, 2}; padding: {1, 1}
+    memory::dims pool5_dst_tz = {N, 512, 7, 7};
+    memory::dims pool5_kernel = {2, 2};
+    memory::dims pool5_strides = {2, 2};
+    memory::dims pool5_padding = {0, 0};
+    MaxPooling pool5(eng, net_fwd, net_fwd_args,
+                conv8_dst_memory,
+                pool5_kernel, pool5_dst_tz,
+                pool5_strides, pool5_padding);
+    memory pool5_dst_memory = pool5.dst_memory();
+
+    // VGG11: FC4096*2
+    // {batch, 512, 7, 7} -> {batch, 4096} -> {batch, 4096}
+    memory::dims fc1_src_tz = {N, 512, 7, 7};
+    memory::dims fc1_weights_tz = {4096, 512, 7, 7};
+    memory::dims fc1_dst_tz = {N, 4096};
+    Dense fc1(eng, net_fwd, net_fwd_args,
+                pool5_dst_memory, fc1_src_tz,
+                fc1_dst_tz, fc1_weights_tz);
+    memory fc1_dst_memory = fc1.dst_memory();
+
+    ReLU fc1_relu(eng, net_fwd, net_fwd_args,
+                fc1_dst_memory, negative_slope);
+    memory fc1_relu_dst_memory = fc1_relu.dst_memory();
+
+    memory::dims fc2_src_tz = {N, 4096};
+    memory::dims fc2_weights_tz = {4096, 4096};
+    memory::dims fc2_dst_tz = {N, 4096};
+    Dense fc2(eng, net_fwd, net_fwd_args,
+                fc1_relu_dst_memory, fc2_src_tz,
+                fc2_dst_tz, fc2_weights_tz);
+    memory fc2_dst_memory = fc2.dst_memory();
+
+    ReLU fc2_relu(eng, net_fwd, net_fwd_args,
+                fc2_dst_memory, negative_slope);
+    memory fc2_relu_dst_memory = fc2_relu.dst_memory();
+
+    // VGG11: FC1000
+    // {batch, 4096} -> {batch, 1000}
+    memory::dims fc3_src_tz = {N, 4096};
+    memory::dims fc3_weights_tz = {1000, 4096};
+    memory::dims fc3_dst_tz = {N, 1000};
+    Dense fc3(eng, net_fwd, net_fwd_args,
+                fc2_relu_dst_memory, fc3_src_tz,
+                fc3_dst_tz, fc3_weights_tz);
+    memory fc3_dst_memory = fc3.dst_memory();
+
+    ReLU fc3_relu(eng, net_fwd, net_fwd_args,
+                fc3_dst_memory, negative_slope);
+    memory fc3_relu_dst_memory = fc3_relu.dst_memory();
+
+    // VGG11: FC10
+    // {batch, 1000} -> {batch, 10}
+    memory::dims fc4_src_tz = {N, 1000};
+    memory::dims fc4_weights_tz = {10, 1000};
+    memory::dims fc4_dst_tz = {N, 10};
+    Dense fc4(eng, net_fwd, net_fwd_args,
+                fc3_relu_dst_memory, fc4_src_tz,
+                fc4_dst_tz, fc4_weights_tz);
+    memory fc4_dst_memory = fc4.dst_memory();
+
+    // VGG11: the end, softmax
+    memory::dims softmax_src_tz = {N, 10};
+    auto softmax_src_md = memory::desc(softmax_src_tz, dt::f32, tag::nc);
+    auto softmax_dec = softmax_forward::desc(prop_kind::forward_training, softmax_src_md, 1);
+    auto softmax_pd = softmax_forward::primitive_desc(softmax_dec, eng);
+    auto softmax_dst_memory = memory(softmax_pd.dst_desc(), eng);
+
+    net_fwd.push_back(softmax_forward(softmax_pd));
+    net_fwd_args.push_back({{DNNL_ARG_SRC, fc4_dst_memory},
+                            {DNNL_ARG_DST, softmax_dst_memory}});
+
+    memory::dims y_tz = {N, 10};
+    CrossEntropyLoss loss(eng, net_fwd, net_fwd_args, softmax_dst_memory, net_dst_memory, y_tz);
+
+
+    //-----------------------------------------------------------------------
+    //----------------- Backpropagation Stream  (Data)-------------------------------------
+
+
+
+    return;
+
+
+#ifndef MODIFY
     std::vector<float> conv1_weights(product(conv1_weights_tz));
     std::vector<float> conv1_bias(product(conv1_bias_tz));
 
@@ -101,9 +452,6 @@ void VGG11(engine::kind engine_kind) {
     for (size_t i = 0; i < conv1_bias.size(); ++i)
         conv1_bias[i] = sinf((float)i);
 
-    auto conv1_user_src_memory
-            = memory({{conv1_src_tz}, dt::f32, tag::nchw}, eng);
-    write_to_dnnl_memory(net_src.data(), conv1_user_src_memory);
     auto conv1_user_weights_memory
             = memory({{conv1_weights_tz}, dt::f32, tag::oihw}, eng);
     write_to_dnnl_memory(conv1_weights.data(), conv1_user_weights_memory);
@@ -160,7 +508,6 @@ void VGG11(engine::kind engine_kind) {
             {DNNL_ARG_DST, conv1_dst_memory}});
 
     // VGG11: block 1-2: ReLU
-    const float negative_slope = 0.0f;
 
     auto relu1_desc = eltwise_forward::desc(prop_kind::forward,
             algorithm::eltwise_relu, conv1_dst_memory.get_desc(),
@@ -589,8 +936,9 @@ void VGG11(engine::kind engine_kind) {
             {DNNL_ARG_WEIGHTS, conv5_weights_memory},
             {DNNL_ARG_BIAS, conv5_bias_memory},
             {DNNL_ARG_DST, conv5_dst_memory}});
+#endif
 
-    return;
+
 }
 
 
@@ -634,4 +982,211 @@ int main(int argc, char* argv[]) {
     return handle_example_errors(VGG11, parse_engine_kind(argc, argv));
 #endif
 
+}
+
+Conv2DwithReLu::Conv2DwithReLu(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory, const memory::dims &src_tz,
+            const memory::dims &dst_tz, const memory::dims &weights_tz,
+            const memory::dims &strides, const memory::dims &padding,
+            const float &negative_slope):
+            weights(product(weights_tz)),
+            bias(weights_tz.at(0))
+{
+    // initializing non-zero values for weights and bias
+    for (size_t i = 0; i < weights.size(); ++i)
+        weights[i] = sinf((float)i);
+    for (size_t i = 0; i < bias.size(); ++i)
+        bias[i] = sinf((float)i);
+
+    memory::dims bias_tz = {weights_tz[0]};
+
+#ifdef USEREORDER
+    auto user_weights_memory
+            = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    write_to_dnnl_memory(weights.data(), user_weights_memory);
+    auto user_bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    write_to_dnnl_memory(bias.data(), user_bias_memory);
+#endif
+
+#ifndef USEREORDER
+    auto weights_memory
+            = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    write_to_dnnl_memory(weights.data(), weights_memory);
+    auto bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    write_to_dnnl_memory(bias.data(), bias_memory);
+#endif
+
+    auto src_md = memory::desc({src_tz}, dt::f32, tag::any);
+    auto bias_md = memory::desc({bias_tz}, dt::f32, tag::any);
+    auto weights_md = memory::desc({weights_tz}, dt::f32, tag::any);
+    auto dst_md = memory::desc({dst_tz}, dt::f32, tag::any);
+
+    auto desc = convolution_forward::desc(prop_kind::forward,
+            algorithm::convolution_direct, src_md, weights_md,
+            bias_md, dst_md, strides, padding,
+            padding);
+    auto pd = convolution_forward::primitive_desc(desc, eng);
+
+#ifdef USEREORDER
+    // create reorder primitives between user input and conv src if needed
+    auto weights_memory = user_weights_memory;
+    if (pd.weights_desc() != user_weights_memory.get_desc()) {
+        weights_memory = memory(pd.weights_desc(), eng);
+        net.push_back(
+                reorder(user_weights_memory, weights_memory));
+        net_args.push_back({{DNNL_ARG_FROM, user_weights_memory},
+                {DNNL_ARG_TO, weights_memory}});
+    }
+
+    // added by rbj (159 modified as well)
+    auto bias_memory = user_bias_memory;
+    if (pd.bias_desc() != user_bias_memory.get_desc()) {
+        bias_memory = memory(pd.bias_desc(), eng);
+        net.push_back(
+            reorder(user_bias_memory, bias_memory)
+        );
+        net_args.push_back({{DNNL_ARG_FROM, user_bias_memory}, {DNNL_ARG_TO, bias_memory}});
+    }
+#endif
+
+    // create memory for conv dst
+    auto conv_dst_memory = memory(pd.dst_desc(), eng);
+
+    // finally create a convolution primitive
+    net.push_back(convolution_forward(pd));
+    net_args.push_back({{DNNL_ARG_SRC, src_memory},
+            {DNNL_ARG_WEIGHTS, weights_memory},
+            {DNNL_ARG_BIAS, bias_memory},
+            {DNNL_ARG_DST, conv_dst_memory}});
+
+    // ReLU
+    auto relu_desc = eltwise_forward::desc(prop_kind::forward_training,
+            algorithm::eltwise_relu, conv_dst_memory.get_desc(),
+            negative_slope);
+    auto relu_pd = eltwise_forward::primitive_desc(relu_desc, eng);
+
+    // create relu dst memory
+    auto relu_dst_memory = memory(relu_pd.dst_desc(), eng);
+
+    net.push_back(eltwise_forward(relu_pd));
+    net_args.push_back({{DNNL_ARG_SRC, conv_dst_memory},
+            {DNNL_ARG_DST, relu_dst_memory}});
+    dst_m = relu_dst_memory;
+}
+
+
+
+MaxPooling::MaxPooling(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory,
+            const memory::dims &kernel,
+            const memory::dims &dst_tz, const memory::dims &strides,
+            const memory::dims &padding, bool trained): iftrain(trained)
+{
+    auto dst_md = memory::desc({dst_tz}, dt::f32, tag::any);
+
+    //[Create pooling primitive]
+    auto desc = pooling_forward::desc(prop_kind::forward_training,
+            algorithm::pooling_max, src_memory.get_desc(), dst_md,
+            strides, kernel, padding, padding);
+    auto pd = pooling_forward::primitive_desc(desc, eng);
+    auto dst_memory = memory(pd.dst_desc(), eng);
+    //[Create pooling primitive]
+
+
+    net.push_back(pooling_forward(pd));
+    net_args.push_back({{DNNL_ARG_SRC, src_memory},
+            {DNNL_ARG_DST, dst_memory}});
+            // {DNNL_ARG_WORKSPACE, workspace_memory}
+
+    // create pooling workspace memory if training
+    if (trained) {
+        auto workspace_memory = memory(pd.workspace_desc(), eng);
+        net_args.back().insert({DNNL_ARG_WORKSPACE, workspace_memory});
+    }
+
+    dst_m = dst_memory;
+}
+
+Dense::Dense(dnnl::engine eng, std::vector<primitive> &net,
+            std::vector<std::unordered_map<int, memory>> &net_args,
+            const memory &src_memory, const memory::dims &src_tz,
+            const memory::dims &dst_tz,
+            const memory::dims &weights_tz):
+            weights(product(weights_tz)),
+            bias(weights_tz.at(0))
+{
+    // initializing non-zero values for weights and bias
+    for (size_t i = 0; i < weights.size(); ++i)
+        weights[i] = sinf((float)i);
+    for (size_t i = 0; i < bias.size(); ++i)
+        bias[i] = sinf((float)i);
+
+    memory::dims bias_tz = {weights_tz[0]};
+
+    // create memory for user data
+    auto weights_memory
+            = memory({{weights_tz}, dt::f32, (weights_tz.size() == 2 ? tag::oi : tag::oihw)}, eng);
+    write_to_dnnl_memory(weights.data(), weights_memory);
+    auto bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    write_to_dnnl_memory(bias.data(), bias_memory);
+
+    // create memory descriptors for convolution data w/ no specified format
+    auto src_md = memory::desc({src_tz}, dt::f32, tag::any);
+    auto bias_md = memory::desc({bias_tz}, dt::f32, tag::any);
+    auto weights_md = memory::desc({weights_tz}, dt::f32, tag::any);
+    auto dst_md = memory::desc({dst_tz}, dt::f32, tag::any);
+
+    // create a inner_product
+    auto desc = inner_product_forward::desc(prop_kind::forward_training,
+            src_md, weights_md, bias_md, dst_md);
+    auto pd = inner_product_forward::primitive_desc(desc, eng);
+
+    auto dst_memory = memory(pd.dst_desc(), eng);
+
+    // create convolution primitive and add it to net
+    net.push_back(inner_product_forward(pd));
+    net_args.push_back({{DNNL_ARG_SRC, src_memory},
+            {DNNL_ARG_WEIGHTS, weights_memory},
+            {DNNL_ARG_BIAS, bias_memory},
+            {DNNL_ARG_DST, dst_memory}});
+
+    dst_m = dst_memory;
+}
+
+CrossEntropyLoss::CrossEntropyLoss(dnnl::engine eng, std::vector<primitive> &net,
+                            std::vector<std::unordered_map<int, memory>> &net_args,
+                            const memory &y_hat_memory, const memory &y_true_memory,
+                            const memory::dims &y_tz)
+{
+
+    // 0) Clip y_hat to avoid performing log(0)
+
+    float lower = 1e-7; // alpha
+    float upper = 1-1e-7; // beta
+
+    auto y_md = memory::desc({y_tz}, dt::f32, tag::nc);
+    auto y_hat_cliped_memory = memory(y_md, eng);
+
+    auto clip_desc = eltwise_forward::desc(prop_kind::forward_training, algorithm::eltwise_clip,
+                                                y_md, lower, upper);
+    auto clip_pd = eltwise_forward::primitive_desc(clip_desc, eng);
+
+    net.push_back(eltwise_forward(clip_pd));
+    net_args.push_back({{DNNL_ARG_SRC, y_hat_memory},
+                        {DNNL_ARG_DST, y_hat_cliped_memory}});
+
+    // 1) Perform elementwise log on y_hat_cliped
+    auto y_hat_logged_memory = memory(y_md, eng);
+
+    auto log_desc = eltwise_forward::desc(prop_kind::forward_training, algorithm::eltwise_log, y_md);
+    auto log_pd = eltwise_forward::primitive_desc(log_desc, eng);
+
+    net.push_back(eltwise_forward(log_pd));
+    net_args.push_back({{DNNL_ARG_SRC, y_hat_cliped_memory},
+                        {DNNL_ARG_DST, y_hat_logged_memory}});
+
+
+    return;
 }
