@@ -1,13 +1,6 @@
-#include <assert.h>
-#include <math.h>
-#include <iostream>
-// export CPLUS_INCLUDE_PATH=/home/cauchy/github/mnist-fashion/include:$CPLUS_INCLUDE_PATH
 #include "mnist/mnist_reader.hpp"
-// export CPLUS_INCLUDE_PATH=/usr/local/include/opencv4:$CPLUS_INCLUDE_PATH
 #include <opencv2/opencv.hpp>
 #include "my_layers.hpp"
-
-using namespace dnnl;
 
 // #define DEBUG
 #define MODIFY
@@ -17,7 +10,12 @@ const std::string MNIST_DATA_LOCATION =
     "/home/cauchy/github/mnist-fashion/data/mnist";
 const std::string MNIST_FASHION_DATA_LOCATION =
     "/home/cauchy/github/mnist-fashion/data/fashion";
+
+// hyper parameter
 const memory::dim N = 16;  // batch_size
+    const float LearningRate = 0.01;
+    const int epoch = 1;
+
 
 // get fasion-mnist
 mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
@@ -29,14 +27,45 @@ memory::dim test_t = 0;
 using tag = memory::format_tag;
 using dt = memory::data_type;
 
+void updateWeights_SGD(
+    dnnl::memory weights, dnnl::memory diff_weights, float learning_rate,
+    std::vector<dnnl::primitive>& net,
+    std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
+    dnnl::engine eng) {
+
+    std::vector<dnnl::memory> sub_vector = {weights, diff_weights};
+    std::vector<dnnl::memory::desc> sub_vector_md = {sub_vector[0].get_desc(),
+                                                     sub_vector[1].get_desc()};
+
+    // Minibatch gradient descent needs normalization
+    const long minibatch_size = sub_vector_md[0].dims()[0];
+    std::vector<float> scales = {1.f, (learning_rate) * (-1.f)};
+
+    auto weights_update_pd =
+        dnnl::sum::primitive_desc(sub_vector_md[0], scales, sub_vector_md, eng);
+
+    net.push_back(dnnl::sum(weights_update_pd));
+
+    std::unordered_map<int, dnnl::memory> sum_args;
+
+    sum_args.insert({DNNL_ARG_DST, sub_vector[0]});
+    for (int i = 0; i < sub_vector.size(); ++i) {
+        sum_args.insert({DNNL_ARG_MULTIPLE_SRC + i, sub_vector[i]});
+    }
+
+    net_args.push_back(sum_args);
+}
+
 void VGG11(engine::kind engine_kind) {
+
 
     auto eng = engine(engine_kind, 0);
     stream s(eng);
 
     // Vector of primitives and their execute arguments
-    std::vector<primitive> net_fwd, net_bwd;
-    std::vector<std::unordered_map<int, memory>> net_fwd_args, net_bwd_args;
+    std::vector<primitive> net_fwd, net_bwd, net_sgd;
+    std::vector<std::unordered_map<int, memory>> net_fwd_args, net_bwd_args,
+        net_sgd_args;
 
     // Vectors of input data and expected output
     std::vector<float> net_src(N * 3 * 224 * 224);
@@ -314,7 +343,7 @@ void VGG11(engine::kind engine_kind) {
     float upper = 1 - 1e-7;  // beta
 
     auto y_md = memory::desc({y_tz}, dt::f32, tag::nc);
-    auto y_hat_cliped_memory = memory(y_md, eng);
+    auto y_hat_clipped_memory = memory(y_md, eng);
 
     auto clip_desc =
         eltwise_forward::desc(prop_kind::forward_training,
@@ -323,7 +352,7 @@ void VGG11(engine::kind engine_kind) {
 
     net_fwd.push_back(eltwise_forward(clip_pd));
     net_fwd_args.push_back({{DNNL_ARG_SRC, softmax_dst_memory},
-                            {DNNL_ARG_DST, y_hat_cliped_memory}});
+                            {DNNL_ARG_DST, y_hat_clipped_memory}});
 
     // 1) Perform elementwise log on y_hat_cliped
     auto y_hat_logged_memory = memory(y_md, eng);
@@ -333,32 +362,32 @@ void VGG11(engine::kind engine_kind) {
     auto log_pd = eltwise_forward::primitive_desc(log_desc, eng);
 
     net_fwd.push_back(eltwise_forward(log_pd));
-    net_fwd_args.push_back({{DNNL_ARG_SRC, y_hat_cliped_memory},
+    net_fwd_args.push_back({{DNNL_ARG_SRC, y_hat_clipped_memory},
                             {DNNL_ARG_DST, y_hat_logged_memory}});
+    std::vector<float> y_hat_logged(product(y_tz));
+    std::vector<float> y_hat_clipped(product(y_tz));
 
     // using log(y_hat) and y_true to calculate cross entropy
     // wait until training
-    memory::dims loss_tz = {N, 1};
-    auto loss_md = memory::desc({loss_tz}, dt::f32, tag::nc);
-    auto loss_memory = memory(loss_md, eng);
 
     //-----------------------------------------------------------------------
-    //----------------- Backpropagation Stream  (Data)-------------------------------------
+    //----------------- Backpropagation Stream-------------------------------------
 
-    // use loss and y_hat to calculate loss_diff({N, 10})
+    // use loss and y_hat to calculate diff_y_hat({N, 10})
     // wait until training
-    auto loss_diff_md = memory::desc({y_tz}, dt::f32, tag::nc);
-    auto loss_diff_memory = memory(loss_diff_md, eng);
+    std::vector<float> diff_y_hat(product(y_tz));
+    auto diff_y_hat_md = memory::desc({y_tz}, dt::f32, tag::nc);
+    auto diff_y_hat_memory = memory(diff_y_hat_md, eng);
 
     // softmax back
     auto softmax_back_desc =
-        softmax_backward::desc(loss_diff_md, softmax_src_md, 1);
+        softmax_backward::desc(diff_y_hat_md, softmax_src_md, 1);
     auto softmax_back_pd =
         softmax_backward::primitive_desc(softmax_back_desc, eng, softmax_pd);
     auto softmax_diff_src_memory = memory(softmax_src_md, eng);
 
     net_bwd.push_back(softmax_backward(softmax_back_pd));
-    net_bwd_args.push_back({{DNNL_ARG_DIFF_DST, loss_diff_memory},
+    net_bwd_args.push_back({{DNNL_ARG_DIFF_DST, diff_y_hat_memory},
                             {DNNL_ARG_DST, softmax_dst_memory},
                             {DNNL_ARG_DIFF_SRC, softmax_diff_src_memory}});
 
@@ -398,11 +427,156 @@ void VGG11(engine::kind engine_kind) {
         fc1_back.diff_src_memory, conv8_dst_memory, pool5);
 
     // conv8 back
-    Conv2DwithReLu_back conv8_back(eng, net_bwd, net_bwd_args, conv8_weights_tz, conv8_strides, conv8_padding
-                , pool5_back.diff_src_memory, conv7_dst_memory, conv8);
+    Conv2DwithReLu_back conv8_back(
+        eng, net_bwd, net_bwd_args, conv8_weights_tz, conv8_strides,
+        conv8_padding, pool5_back.diff_src_memory, conv7_dst_memory, conv8);
 
+    // conv7 back
+    Conv2DwithReLu_back conv7_back(
+        eng, net_bwd, net_bwd_args, conv7_weights_tz, conv7_strides,
+        conv7_padding, conv8_back.diff_src_memory, pool4_dst_memory, conv7);
 
-    return;
+    // pool4 back
+    MaxPooling_back pool4_back(
+        eng, net_bwd, net_bwd_args, pool4_kernel, pool4_strides, pool4_padding,
+        conv7_back.diff_src_memory, conv6_dst_memory, pool4);
+
+    // conv6 back
+    Conv2DwithReLu_back conv6_back(
+        eng, net_bwd, net_bwd_args, conv6_weights_tz, conv6_strides,
+        conv6_padding, pool4_back.diff_src_memory, conv5_dst_memory, conv6);
+
+    // conv5 back
+    Conv2DwithReLu_back conv5_back(
+        eng, net_bwd, net_bwd_args, conv5_weights_tz, conv5_strides,
+        conv5_padding, conv6_back.diff_src_memory, pool3_dst_memory, conv5);
+
+    // pool3 back
+    MaxPooling_back pool3_back(
+        eng, net_bwd, net_bwd_args, pool3_kernel, pool3_strides, pool3_padding,
+        conv5_back.diff_src_memory, conv4_dst_memory, pool3);
+
+    // conv4 back
+    Conv2DwithReLu_back conv4_back(
+        eng, net_bwd, net_bwd_args, conv4_weights_tz, conv4_strides,
+        conv4_padding, pool3_back.diff_src_memory, conv3_dst_memory, conv4);
+
+    // conv3 back
+    Conv2DwithReLu_back conv3_back(
+        eng, net_bwd, net_bwd_args, conv3_weights_tz, conv3_strides,
+        conv3_padding, conv4_back.diff_src_memory, pool2_dst_memory, conv3);
+
+    // pool2 back
+    MaxPooling_back pool2_back(
+        eng, net_bwd, net_bwd_args, pool2_kernel, pool2_strides, pool2_padding,
+        conv3_back.diff_src_memory, conv2_dst_memory, pool2);
+
+    // conv2 back
+    Conv2DwithReLu_back conv2_back(
+        eng, net_bwd, net_bwd_args, conv2_weights_tz, conv2_strides,
+        conv2_padding, pool2_back.diff_src_memory, pool1_dst_memory, conv2);
+
+    // pool1 back
+    MaxPooling_back pool1_back(
+        eng, net_bwd, net_bwd_args, pool1_kernel, pool1_strides, pool1_padding,
+        conv2_back.diff_src_memory, conv1_dst_memory, pool1);
+
+    // conv1 back
+    Conv2DwithReLu_back conv1_back(
+        eng, net_bwd, net_bwd_args, conv1_weights_tz, conv1_strides,
+        conv1_padding, pool1_back.diff_src_memory, conv1_src_memory, conv1);
+
+    //-----------------------------------------------------------------------
+    //----------------- Weights update -------------------------------------
+    updateWeights_SGD(conv1.weights_memory, conv1_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv2.weights_memory, conv2_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv3.weights_memory, conv3_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv4.weights_memory, conv4_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv5.weights_memory, conv5_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv6.weights_memory, conv6_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv7.weights_memory, conv7_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv8.weights_memory, conv8_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+
+    updateWeights_SGD(fc1.weights_memory, fc1_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc2.weights_memory, fc2_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc3.weights_memory, fc3_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc4.weights_memory, fc4_back.diff_weights_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+
+    updateWeights_SGD(conv1.bias_memory, conv1_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv2.bias_memory, conv2_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv3.bias_memory, conv3_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv4.bias_memory, conv4_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv5.bias_memory, conv5_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv6.bias_memory, conv6_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv7.bias_memory, conv7_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(conv8.bias_memory, conv8_back.diff_bias_memory,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+
+    updateWeights_SGD(fc1.bias_memory, fc1_back.diff_bias_memory, LearningRate,
+                      net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc2.bias_memory, fc2_back.diff_bias_memory, LearningRate,
+                      net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc3.bias_memory, fc3_back.diff_bias_memory, LearningRate,
+                      net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc4.bias_memory, fc4_back.diff_bias_memory, LearningRate,
+                      net_sgd, net_sgd_args, eng);
+
+    // training
+
+    std::vector<float> loss(epoch);
+
+    for (size_t k = 0; k < epoch; ++k) {
+
+        // forward calculate
+        for (size_t i = 0; i < net_fwd.size(); ++i){
+            net_fwd.at(i).execute(s, net_fwd_args.at(i));
+            std::cout << "Forward primitive " << i << " executed!" << std::endl;
+        }
+
+        // calculate the loss function -- cross entropy
+        read_from_dnnl_memory(y_hat_clipped.data(), y_hat_clipped_memory);
+        read_from_dnnl_memory(y_hat_logged.data(), y_hat_logged_memory);
+        float crossEntropy = 0;
+        for (size_t j = 0; j < y_hat_logged.size(); ++j) {
+            crossEntropy += y_hat_logged[j] * net_dst[j];
+            diff_y_hat[j] = -net_dst[j] / ((float)N * y_hat_clipped[j]);
+        }
+        crossEntropy /= (float)(-N);
+        loss.push_back(crossEntropy);
+        write_to_dnnl_memory(diff_y_hat.data(), diff_y_hat_memory);
+
+        // backward calculate
+        for (size_t i = 0; i < net_bwd.size(); ++i) {
+            net_bwd.at(i).execute(s, net_bwd_args.at(i));
+            std::cout << "Backward primitive " << i << " executed!" << std::endl;
+        }
+
+        // finally update weights and bias
+        for (size_t i = 0; i < net_sgd.size(); ++i)
+            net_sgd.at(i).execute(s, net_sgd_args.at(i));
+
+        std::cout << k << "th training, loss: " << crossEntropy << std::endl;
+    }
+    s.wait();
 }
 
 int main(int argc, char* argv[]) {

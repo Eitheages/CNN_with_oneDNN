@@ -1,7 +1,7 @@
 #ifndef MY_LAYERS
 #define MY_LAYERS
 
-#include <math.h>
+#include <bits/stdc++.h>
 #include "example_utils.hpp"
 #include "oneapi/dnnl/dnnl.hpp"
 
@@ -24,11 +24,9 @@ public:
     convolution_forward::primitive_desc conv_pd() const { return pd1_m; }
     eltwise_forward::primitive_desc relu_pd() const { return pd2_m; }
 
-    memory conv_dst_memory, weights_memory;  // for backward
+    memory conv_dst_memory, weights_memory, bias_memory;  // for backward
 
 private:
-    std::vector<float> weights;
-    std::vector<float> bias;
     memory dst_m;
     convolution_forward::primitive_desc pd1_m;
     eltwise_forward::primitive_desc pd2_m;
@@ -102,11 +100,9 @@ public:
         return pd_m;
     }
 
-    memory weights_memory;
+    memory weights_memory, bias_memory;
 
 private:
-    std::vector<float> weights;
-    std::vector<float> bias;
     memory dst_m;
     dnnl::inner_product_forward::primitive_desc pd_m;
 };
@@ -152,18 +148,6 @@ public:
     memory diff_src_memory;
 };
 
-class CrossEntropyLoss {
-public:
-    CrossEntropyLoss(engine eng, std::vector<primitive>& net,
-                     std::vector<std::unordered_map<int, memory>>& net_args,
-                     const memory& y_hat, const memory& y_true,
-                     const memory::dims& y_tz);
-    ~CrossEntropyLoss() = default;
-    CrossEntropyLoss(const CrossEntropyLoss& obj);
-
-private:
-};
-
 class Dense_back {
     // calc diff_weights and diff_bias based on diff_dst and src
     // calc diff_src based on diff_dst and weights
@@ -183,13 +167,19 @@ Conv2DwithReLu::Conv2DwithReLu(
     const memory& src_memory, const memory::dims& src_tz,
     const memory::dims& dst_tz, const memory::dims& weights_tz,
     const memory::dims& strides, const memory::dims& padding,
-    const float& negative_slope)
-    : weights(product(weights_tz)), bias(weights_tz.at(0)) {
+    const float& negative_slope) {
+
+    std::vector<float> weights(product(weights_tz));
+    std::vector<float> bias(weights_tz.at(0));
+
+    std::default_random_engine generator(155);
+    std::normal_distribution<float> norm_dist(0.f, 1.f);
+
     // initializing non-zero values for weights and bias
     for (size_t i = 0; i < weights.size(); ++i)
-        weights[i] = sinf((float)i);
+        weights[i] = norm_dist(generator);
     for (size_t i = 0; i < bias.size(); ++i)
-        bias[i] = sinf((float)i);
+        bias[i] = norm_dist(generator);
 
     memory::dims bias_tz = {weights_tz[0]};
 
@@ -201,9 +191,9 @@ Conv2DwithReLu::Conv2DwithReLu(
 #endif
 
 #ifndef USEREORDER
-    auto weights_memory = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    weights_memory = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
     write_to_dnnl_memory(weights.data(), weights_memory);
-    auto bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
     write_to_dnnl_memory(bias.data(), bias_memory);
 #endif
 
@@ -298,13 +288,19 @@ MaxPooling::MaxPooling(dnnl::engine eng, std::vector<primitive>& net,
 Dense::Dense(dnnl::engine eng, std::vector<primitive>& net,
              std::vector<std::unordered_map<int, memory>>& net_args,
              const memory& src_memory, const memory::dims& src_tz,
-             const memory::dims& dst_tz, const memory::dims& weights_tz)
-    : weights(product(weights_tz)), bias(weights_tz.at(0)) {
+             const memory::dims& dst_tz, const memory::dims& weights_tz) {
+
+    std::vector<float> weights(product(weights_tz));
+    std::vector<float> bias(weights_tz.at(0));
+
+    std::default_random_engine generator(155);
+    std::normal_distribution<float> norm_dist(0.f, 1.f);
+
     // initializing non-zero values for weights and bias
     for (size_t i = 0; i < weights.size(); ++i)
-        weights[i] = sinf((float)i);
+        weights[i] = norm_dist(generator);
     for (size_t i = 0; i < bias.size(); ++i)
-        bias[i] = sinf((float)i);
+        bias[i] = norm_dist(generator);
 
     memory::dims bias_tz = {weights_tz[0]};
 
@@ -313,7 +309,7 @@ Dense::Dense(dnnl::engine eng, std::vector<primitive>& net,
         {{weights_tz}, dt::f32, (weights_tz.size() == 2 ? tag::oi : tag::oihw)},
         eng);
     write_to_dnnl_memory(weights.data(), weights_memory);
-    auto bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
     write_to_dnnl_memory(bias.data(), bias_memory);
 
     // create memory descriptors for convolution data w/ no specified format
@@ -338,43 +334,6 @@ Dense::Dense(dnnl::engine eng, std::vector<primitive>& net,
 
     dst_m = dst_memory;
     pd_m = pd;
-}
-
-CrossEntropyLoss::CrossEntropyLoss(
-    dnnl::engine eng, std::vector<primitive>& net,
-    std::vector<std::unordered_map<int, memory>>& net_args,
-    const memory& y_hat_memory, const memory& y_true_memory,
-    const memory::dims& y_tz) {
-
-    // 0) Clip y_hat to avoid performing log(0)
-
-    float lower = 1e-7;      // alpha
-    float upper = 1 - 1e-7;  // beta
-
-    auto y_md = memory::desc({y_tz}, dt::f32, tag::nc);
-    auto y_hat_cliped_memory = memory(y_md, eng);
-
-    auto clip_desc =
-        eltwise_forward::desc(prop_kind::forward_training,
-                              algorithm::eltwise_clip, y_md, lower, upper);
-    auto clip_pd = eltwise_forward::primitive_desc(clip_desc, eng);
-
-    net.push_back(eltwise_forward(clip_pd));
-    net_args.push_back(
-        {{DNNL_ARG_SRC, y_hat_memory}, {DNNL_ARG_DST, y_hat_cliped_memory}});
-
-    // 1) Perform elementwise log on y_hat_cliped
-    auto y_hat_logged_memory = memory(y_md, eng);
-
-    auto log_desc = eltwise_forward::desc(prop_kind::forward_training,
-                                          algorithm::eltwise_log, y_md);
-    auto log_pd = eltwise_forward::primitive_desc(log_desc, eng);
-
-    net.push_back(eltwise_forward(log_pd));
-    net_args.push_back({{DNNL_ARG_SRC, y_hat_cliped_memory},
-                        {DNNL_ARG_DST, y_hat_logged_memory}});
-
-    return;
 }
 
 Dense_back::Dense_back(engine eng, std::vector<primitive>& net,
@@ -404,8 +363,8 @@ Dense_back::Dense_back(engine eng, std::vector<primitive>& net,
     net.push_back(inner_product_backward_weights(bwd_weights_pd));
     net_args.push_back({{DNNL_ARG_DIFF_DST, diff_dst_memory},
                         {DNNL_ARG_SRC, src_memory},
-                        {DNNL_ARG_WEIGHTS, diff_weights_memory},
-                        {DNNL_ARG_BIAS, diff_bias_memory}});
+                        {DNNL_ARG_DIFF_WEIGHTS, diff_weights_memory},
+                        {DNNL_ARG_DIFF_BIAS, diff_bias_memory}});
 
     auto bwd_data_desc = inner_product_backward_data::desc(
         src_md, dense_fwd.weights_memory.get_desc(), diff_dst_md);
@@ -456,7 +415,7 @@ MaxPooling_back::MaxPooling_back(
         pooling_backward::primitive_desc(bwd_desc, eng, pool_bwd.prim_desc());
 
     net.push_back(pooling_backward(bwd_pd));
-    net_args.push_back({{DNNL_ARG_DST, diff_dst_memory},
+    net_args.push_back({{DNNL_ARG_DIFF_DST, diff_dst_memory},
                         {DNNL_ARG_WORKSPACE, pool_bwd.workspace_memory},
                         {DNNL_ARG_DIFF_SRC, diff_src_memory}});
 }
