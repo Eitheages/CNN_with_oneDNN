@@ -18,7 +18,7 @@ mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
 const int N = 16;  // batch_size
 const int step = 50;
 const float LearningRate = 0.1;
-const int epoch = 30;
+const int epoch = 40;
 
 void LeNet(engine::kind engine_kind) {
     // Vectors of input data and expected output
@@ -283,7 +283,7 @@ void LeNet(engine::kind engine_kind) {
                 }
                 crossEntropy += y_hat_logged[j] * net_dst[j];
                 diff_softmax_src[j] =
-                    (y_hat[j] - net_dst[j]);  // maybe divided by N is not neccessary
+                    (y_hat[j] - net_dst[j]);  // maybe N is not neccessary
             }
             crossEntropy /= (float)(-N);
             entropy[g] = crossEntropy;
