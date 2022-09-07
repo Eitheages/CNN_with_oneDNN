@@ -1,63 +1,31 @@
-#include "mnist/mnist_reader.hpp"
 #include <opencv2/opencv.hpp>
+#include "mnist/mnist_reader.hpp"
 #include "my_layers.hpp"
 
 // #define DEBUG
-#define MODIFY
-// #define USEREORDER
 
 const std::string MNIST_DATA_LOCATION =
     "/home/cauchy/github/mnist-fashion/data/mnist";
 const std::string MNIST_FASHION_DATA_LOCATION =
     "/home/cauchy/github/mnist-fashion/data/fashion";
 
-// hyper parameter
-const memory::dim N = 16;  // batch_size
-    const float LearningRate = 0.01;
-    const int epoch = 1;
-
-
 // get fasion-mnist
 mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
     mnist::read_dataset<std::vector, std::vector, uint8_t, uint8_t>(
         MNIST_FASHION_DATA_LOCATION, 240, 40);
-memory::dim train_t = 0;
-memory::dim test_t = 0;
 
-using tag = memory::format_tag;
-using dt = memory::data_type;
-
-void updateWeights_SGD(
-    dnnl::memory weights, dnnl::memory diff_weights, float learning_rate,
-    std::vector<dnnl::primitive>& net,
-    std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
-    dnnl::engine eng) {
-
-    std::vector<dnnl::memory> sub_vector = {weights, diff_weights};
-    std::vector<dnnl::memory::desc> sub_vector_md = {sub_vector[0].get_desc(),
-                                                     sub_vector[1].get_desc()};
-
-    // Minibatch gradient descent needs normalization
-    const long minibatch_size = sub_vector_md[0].dims()[0];
-    std::vector<float> scales = {1.f, (learning_rate) * (-1.f)};
-
-    auto weights_update_pd =
-        dnnl::sum::primitive_desc(sub_vector_md[0], scales, sub_vector_md, eng);
-
-    net.push_back(dnnl::sum(weights_update_pd));
-
-    std::unordered_map<int, dnnl::memory> sum_args;
-
-    sum_args.insert({DNNL_ARG_DST, sub_vector[0]});
-    for (int i = 0; i < sub_vector.size(); ++i) {
-        sum_args.insert({DNNL_ARG_MULTIPLE_SRC + i, sub_vector[i]});
-    }
-
-    net_args.push_back(sum_args);
-}
+// hyper parameter
+const int N = 16;  // batch_size
+const int step = 10;
+const float LearningRate = 0.01;
+const int epoch = 10;
 
 void VGG11(engine::kind engine_kind) {
 
+    // Vectors of input data and expected output
+    std::vector<float> net_src(N * 3 * 224 * 224);
+    std::vector<float> net_dst(N * 10);  // 10 classes
+    const int IS = 224 * 224;            // input size
 
     auto eng = engine(engine_kind, 0);
     stream s(eng);
@@ -67,54 +35,7 @@ void VGG11(engine::kind engine_kind) {
     std::vector<std::unordered_map<int, memory>> net_fwd_args, net_bwd_args,
         net_sgd_args;
 
-    // Vectors of input data and expected output
-    std::vector<float> net_src(N * 3 * 224 * 224);
-    std::vector<float> net_dst(N * 10);  // 10 classes
-
-    const int IS = 224 * 224;  // input size
-
-    for (size_t i = 0; i < N * 10; ++i)
-        net_dst[i] = (float)0;
-
-    // read src and dst data from fasion-mnist
-    for (size_t i = 0; i < N; ++i) {
-        std::vector<uint8_t> pic = dataset.training_images[train_t];
-        size_t ans = dataset.training_labels[train_t];
-        ++train_t;
-
-        // resize imagine (28, 28) -> (224, 224, 3)
-        cv::Mat img = cv::Mat(28, 28, CV_8U);
-        for (size_t i = 0; i < 28; ++i)
-            for (size_t j = 0; j < 28; ++j)
-                img.at<uint8_t>(i, j) = (uint8_t)pic[i * 28 + j];
-
-        cv::Mat img_rgb(28, 28, CV_8UC3);
-        cv::merge(std::vector<cv::Mat>{img, img, img}, img_rgb);
-
-        cv::Mat img_res(224, 224, CV_8UC3);
-        cv::resize(img_rgb, img_res, cv::Size(), 8, 8,
-                   cv::INTER_LINEAR);  //INTER_CUBIC slower
-
-        auto data = img_res.data;
-
-        int fpi = i * 224 * 224 * 3;  // first pixel index
-
-        // write data into src while doing normalization (divided by 255)
-        for (size_t c = 0; c < 3; ++c)  // channel
-            for (size_t w = 0; w < 224; ++w)
-                for (size_t h = 0; h < 224; ++h)
-                    net_src[fpi + c * IS + w * 224 + h] =
-                        ((float)(*(data + w * 672 + h * 3 + c))) / 255.0;
-
-        // write data into dst
-        net_dst[i * 10 + ans] = 1;
-    }
-
-    auto net_dst_memory =
-        memory({{memory::dims{N, 10}}, dt::f32, tag::nc}, eng);
-    write_to_dnnl_memory(net_dst.data(), net_dst_memory);
-
-    const float negative_slope = 0.0f;
+    const float negative_slope = 0.0f;  // for ReLU
 
     // VGG11: block 1-1: conv1
     // {batch, 3, 224, 224} (x) {64, 3, 3, 3} -> {batch, 64, 224, 224}
@@ -126,7 +47,6 @@ void VGG11(engine::kind engine_kind) {
     memory::dims conv1_padding = {1, 1};
 
     auto conv1_src_memory = memory({{conv1_src_tz}, dt::f32, tag::nchw}, eng);
-    write_to_dnnl_memory(net_src.data(), conv1_src_memory);
 
     Conv2DwithReLu conv1(eng, net_fwd, net_fwd_args, conv1_src_memory,
                          conv1_src_tz, conv1_dst_tz, conv1_weights_tz,
@@ -335,7 +255,6 @@ void VGG11(engine::kind engine_kind) {
         {{DNNL_ARG_SRC, fc4_dst_memory}, {DNNL_ARG_DST, softmax_dst_memory}});
 
     memory::dims y_tz = {N, 10};
-    // CrossEntropyLoss loss(eng, net_fwd, net_fwd_args, softmax_dst_memory, net_dst_memory, y_tz);
 
     // 0) Clip y_hat to avoid performing log(0)
 
@@ -540,42 +459,100 @@ void VGG11(engine::kind engine_kind) {
     updateWeights_SGD(fc4.bias_memory, fc4_back.diff_bias_memory, LearningRate,
                       net_sgd, net_sgd_args, eng);
 
-    // training
+    // data index
 
+    // --------------------- training ----------------------------
     std::vector<float> loss(epoch);
+    std::vector<float> entropy(step);
 
     for (size_t k = 0; k < epoch; ++k) {
+        std::cout << k + 1 << " th training..." << std::endl;
+        int train_t = 0;
+        int test_t = 0;
+        for (size_t g = 0; g < step; ++g) {
 
-        // forward calculate
-        for (size_t i = 0; i < net_fwd.size(); ++i){
-            net_fwd.at(i).execute(s, net_fwd_args.at(i));
-            std::cout << "Forward primitive " << i << " executed!" << std::endl;
+            //---------------- get input and output----------------
+
+            for (size_t i = 0; i < N * 10; ++i)
+                net_dst[i] = (float)0;
+
+            // read src and dst data from fasion-mnist
+            for (size_t i = 0; i < N; ++i) {
+                std::vector<uint8_t> pic = dataset.training_images[train_t];
+                size_t ans = dataset.training_labels[train_t];
+                ++train_t;
+
+                // resize imagine (28, 28) -> (224, 224, 3)
+                cv::Mat img = cv::Mat(28, 28, CV_8U);
+                for (size_t i = 0; i < 28; ++i)
+                    for (size_t j = 0; j < 28; ++j)
+                        img.at<uint8_t>(i, j) = (uint8_t)pic[i * 28 + j];
+
+                cv::Mat img_rgb(28, 28, CV_8UC3);
+                cv::merge(std::vector<cv::Mat>{img, img, img}, img_rgb);
+
+                cv::Mat img_res(224, 224, CV_8UC3);
+                cv::resize(img_rgb, img_res, cv::Size(), 8, 8,
+                           cv::INTER_LINEAR);  //INTER_CUBIC slower
+
+                auto data = img_res.data;
+
+                int fpi = i * 224 * 224 * 3;  // first pixel index
+
+                // write data into src while doing normalization (divided by 255)
+                for (size_t c = 0; c < 3; ++c)  // channel
+                    for (size_t w = 0; w < 224; ++w)
+                        for (size_t h = 0; h < 224; ++h)
+                            net_src[fpi + c * IS + w * 224 + h] =
+                                ((float)(*(data + w * 672 + h * 3 + c))) /
+                                255.0;
+
+                // write data into dst
+                net_dst[i * 10 + ans] = 1;
+            }
+
+            write_to_dnnl_memory(net_src.data(), conv1_src_memory);
+
+            // -----------------------------------------------------
+
+            // forward calculate
+            for (size_t i = 0; i < net_fwd.size(); ++i) {
+                net_fwd.at(i).execute(s, net_fwd_args.at(i));
+                std::cout << "Forward primitive " << i << " executed!"
+                          << std::endl;
+            }
+
+            // calculate the loss function -- cross entropy
+            read_from_dnnl_memory(y_hat_clipped.data(), y_hat_clipped_memory);
+            read_from_dnnl_memory(y_hat_logged.data(), y_hat_logged_memory);
+            float crossEntropy = 0;
+            for (size_t j = 0; j < y_hat_logged.size(); ++j) {
+                crossEntropy += y_hat_logged[j] * net_dst[j];
+                diff_y_hat[j] = -net_dst[j] / ((float)N * y_hat_clipped[j]);
+            }
+            crossEntropy /= (float)(-N);
+            loss[k] = crossEntropy;
+            write_to_dnnl_memory(diff_y_hat.data(), diff_y_hat_memory);
+
+            // backward calculate
+            for (size_t i = 0; i < net_bwd.size(); ++i) {
+                net_bwd.at(i).execute(s, net_bwd_args.at(i));
+                std::cout << "Backward primitive " << i << " executed!"
+                          << std::endl;
+            }
+
+            // finally update weights and bias
+            for (size_t i = 0; i < net_sgd.size(); ++i)
+                net_sgd.at(i).execute(s, net_sgd_args.at(i));
         }
-
-        // calculate the loss function -- cross entropy
-        read_from_dnnl_memory(y_hat_clipped.data(), y_hat_clipped_memory);
-        read_from_dnnl_memory(y_hat_logged.data(), y_hat_logged_memory);
-        float crossEntropy = 0;
-        for (size_t j = 0; j < y_hat_logged.size(); ++j) {
-            crossEntropy += y_hat_logged[j] * net_dst[j];
-            diff_y_hat[j] = -net_dst[j] / ((float)N * y_hat_clipped[j]);
-        }
-        crossEntropy /= (float)(-N);
-        loss.push_back(crossEntropy);
-        write_to_dnnl_memory(diff_y_hat.data(), diff_y_hat_memory);
-
-        // backward calculate
-        for (size_t i = 0; i < net_bwd.size(); ++i) {
-            net_bwd.at(i).execute(s, net_bwd_args.at(i));
-            std::cout << "Backward primitive " << i << " executed!" << std::endl;
-        }
-
-        // finally update weights and bias
-        for (size_t i = 0; i < net_sgd.size(); ++i)
-            net_sgd.at(i).execute(s, net_sgd_args.at(i));
-
-        std::cout << k << "th training, loss: " << crossEntropy << std::endl;
+        float loss_sum = 0;
+        for (size_t g = 0; g < step; ++g)
+            loss_sum += entropy[g];
+        loss[k] = loss_sum / step;
+        std::cout << k + 1 << " th training, loss: " << loss[k] << std::endl;
     }
+    for (size_t k = 0; k < epoch; ++k)
+        std::cout << k << "th training, loss: " << loss[k] << std::endl;
     s.wait();
 }
 
@@ -618,6 +595,10 @@ int main(int argc, char* argv[]) {
 #endif
 
 #ifndef DEBUG
+    if (dataset.training_images.size() < step * N) {
+        std::cout << "there are not so much data!" << std::endl;
+        return 0;
+    }
     return handle_example_errors(VGG11, parse_engine_kind(argc, argv));
 #endif
 }

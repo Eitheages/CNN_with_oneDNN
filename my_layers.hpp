@@ -1,5 +1,6 @@
 #ifndef MY_LAYERS
 #define MY_LAYERS
+// #define USEREORDER
 
 #include <bits/stdc++.h>
 #include "example_utils.hpp"
@@ -16,13 +17,37 @@ public:
                    const memory& src_memory, const memory::dims& src_tz,
                    const memory::dims& dst_tz, const memory::dims& weights_tz,
                    const memory::dims& strides, const memory::dims& padding,
-                   const float& negative_slope);
+                   const float& negative_slope = 0.f);
     ~Conv2DwithReLu() = default;
     Conv2DwithReLu(const Conv2DwithReLu& obj) =
         delete;  // ban copying to avoid some bugs
     memory dst_memory() const { return dst_m; }
     convolution_forward::primitive_desc conv_pd() const { return pd1_m; }
     eltwise_forward::primitive_desc relu_pd() const { return pd2_m; }
+
+    memory conv_dst_memory, weights_memory, bias_memory;  // for backward
+
+private:
+    memory dst_m;
+    convolution_forward::primitive_desc pd1_m;
+    eltwise_forward::primitive_desc pd2_m;
+};
+
+class Conv2DwithActi {
+public:
+    Conv2DwithActi(engine eng, std::vector<primitive>& net,
+                   std::vector<std::unordered_map<int, memory>>& net_args,
+                   const memory& src_memory, const memory::dims& src_tz,
+                   const memory::dims& dst_tz, const memory::dims& weights_tz,
+                   const memory::dims& strides, const memory::dims& padding,
+                   algorithm activation, const float& alpha = 0.f,
+                   const float& beta = 0.f);
+    ~Conv2DwithActi() = default;
+    Conv2DwithActi(const Conv2DwithActi& obj) =
+        delete;  // ban copying to avoid some bugs
+    memory dst_memory() const { return dst_m; }
+    convolution_forward::primitive_desc conv_pd() const { return pd1_m; }
+    eltwise_forward::primitive_desc eltwise_pd() const { return pd2_m; }
 
     memory conv_dst_memory, weights_memory, bias_memory;  // for backward
 
@@ -53,6 +78,23 @@ public:
     memory diff_weights_memory, diff_bias_memory;
 };
 
+class Conv2DwithActi_back {
+public:
+    Conv2DwithActi_back(engine eng, std::vector<primitive>& net,
+                        std::vector<std::unordered_map<int, memory>>& net_args,
+                        const memory::dims& weights_tz,
+                        const memory::dims& strides,
+                        const memory::dims& padding,
+                        const memory& diff_dst_memory, const memory& src_memory,
+                        const Conv2DwithActi& conv_fwd, algorithm activation,
+                        const float& alpha = 0.f, const float& beta = 0.f);
+    ~Conv2DwithActi_back() = default;
+    Conv2DwithActi_back(const Conv2DwithActi_back&) = delete;
+
+    memory diff_src_memory;
+    memory diff_weights_memory, diff_bias_memory;
+};
+
 class MaxPooling {
 public:
     MaxPooling(engine eng, std::vector<primitive>& net,
@@ -73,6 +115,24 @@ private:
     pooling_forward::primitive_desc pd_m;
 };
 
+class MeanPooling {
+public:
+    MeanPooling(engine eng, std::vector<primitive>& net,
+                std::vector<std::unordered_map<int, memory>>& net_args,
+                const memory& src_memory, const memory::dims& kernel,
+                const memory::dims& dst_tz, const memory::dims& strides,
+                const memory::dims& padding, algorithm algorithm_type);
+    ~MeanPooling() = default;
+    MeanPooling(const MeanPooling& obj) =
+        delete;  // ban copying to avoid some bugs
+    memory dst_memory() const { return dst_m; }
+    pooling_forward::primitive_desc prim_desc() const { return pd_m; }
+
+private:
+    memory dst_m;
+    pooling_forward::primitive_desc pd_m;
+};
+
 class MaxPooling_back {
     // calc diff_src based on diff_dst and workspace
 public:
@@ -83,6 +143,21 @@ public:
                     const memory& src_memory, const MaxPooling& pool_bwd);
     ~MaxPooling_back() = default;
     MaxPooling_back(const MaxPooling_back&) = delete;
+
+    memory diff_src_memory;
+};
+
+class MeanPooling_back {
+    // calc diff_src based on diff_dst
+public:
+    MeanPooling_back(engine eng, std::vector<primitive>& net,
+                     std::vector<std::unordered_map<int, memory>>& net_args,
+                     const memory::dims& kernel, const memory::dims& strides,
+                     const memory::dims& padding, const memory& diff_dst_memory,
+                     const memory& src_memory, const MeanPooling& pool_bwd,
+                     algorithm algorithm_type);
+    ~MeanPooling_back() = default;
+    MeanPooling_back(const MeanPooling_back&) = delete;
 
     memory diff_src_memory;
 };
@@ -111,24 +186,27 @@ class ReLU {
 public:
     ReLU(engine eng, std::vector<primitive>& net,
          std::vector<std::unordered_map<int, memory>>& net_args,
-         const memory& src_memory, const float& negative_slope) {
-        auto desc = dnnl::eltwise_forward::desc(
-            dnnl::prop_kind::forward_training, algorithm::eltwise_relu,
-            src_memory.get_desc(), negative_slope);
-        auto pd = dnnl::eltwise_forward::primitive_desc(desc, eng);
-
-        // create relu dst memory
-        auto dst_memory = memory(pd.dst_desc(), eng);
-
-        net.push_back(dnnl::eltwise_forward(pd));
-        net_args.push_back(
-            {{DNNL_ARG_SRC, src_memory}, {DNNL_ARG_DST, dst_memory}});
-        dst_m = dst_memory;
-        pd_m = pd;
-    }
+         const memory& src_memory, const float& negative_slope);
 
     ~ReLU() = default;
     ReLU(const ReLU& obj) = delete;
+    memory dst_memory() const { return dst_m; }
+    eltwise_forward::primitive_desc prim_desc() const { return pd_m; }
+
+private:
+    eltwise_forward::primitive_desc pd_m;
+    memory dst_m;
+};
+
+class Eltwise {
+public:
+    Eltwise(engine eng, std::vector<primitive>& net,
+            std::vector<std::unordered_map<int, memory>>& net_args,
+            const memory& src_memory, algorithm activation,
+            const float& alpha = 0.f, const float& beta = 0.f);
+
+    ~Eltwise() = default;
+    Eltwise(const Eltwise& obj) = delete;
     memory dst_memory() const { return dst_m; }
     eltwise_forward::primitive_desc prim_desc() const { return pd_m; }
 
@@ -144,6 +222,18 @@ public:
               std::vector<std::unordered_map<int, memory>>& net_args,
               const memory& diff_dst_memory, const memory& src_memory,
               const ReLU& relu_fwd, float negative_slope = 0.0f);
+
+    memory diff_src_memory;
+};
+
+class Eltwise_back {
+    // calc diff_src based on diff_dst and src
+public:
+    Eltwise_back(engine eng, std::vector<primitive>& net,
+                 std::vector<std::unordered_map<int, memory>>& net_args,
+                 const memory& diff_dst_memory, const memory& src_memory,
+                 const Eltwise& eltwise_fwd, algorithm activation,
+                 const float& alpha = 0.f, const float& beta = 0.f);
 
     memory diff_src_memory;
 };
@@ -285,6 +375,32 @@ MaxPooling::MaxPooling(dnnl::engine eng, std::vector<primitive>& net,
     pd_m = pd;
 }
 
+MeanPooling::MeanPooling(dnnl::engine eng, std::vector<primitive>& net,
+                         std::vector<std::unordered_map<int, memory>>& net_args,
+                         const memory& src_memory, const memory::dims& kernel,
+                         const memory::dims& dst_tz,
+                         const memory::dims& strides,
+                         const memory::dims& padding,
+                         algorithm algorithm_type) {
+    auto dst_md = memory::desc({dst_tz}, dt::f32, tag::any);
+
+    //[Create pooling primitive]
+    auto desc = pooling_forward::desc(
+        prop_kind::forward_training, algorithm::pooling_avg_exclude_padding,
+        src_memory.get_desc(), dst_md, strides, kernel, padding, padding);
+    auto pd = pooling_forward::primitive_desc(desc, eng);
+    auto dst_memory = memory(pd.dst_desc(), eng);
+    //[Create pooling primitive]
+
+    net.push_back(pooling_forward(pd));
+    net_args.push_back(
+        {{DNNL_ARG_SRC, src_memory}, {DNNL_ARG_DST, dst_memory}});
+    // {DNNL_ARG_WORKSPACE, workspace_memory} no need for mean pooling
+
+    dst_m = dst_memory;
+    pd_m = pd;
+}
+
 Dense::Dense(dnnl::engine eng, std::vector<primitive>& net,
              std::vector<std::unordered_map<int, memory>>& net_args,
              const memory& src_memory, const memory::dims& src_tz,
@@ -400,6 +516,26 @@ ReLU_back::ReLU_back(engine eng, std::vector<primitive>& net,
                         {DNNL_ARG_DIFF_SRC, diff_src_memory}});
 }
 
+Eltwise_back::Eltwise_back(
+    engine eng, std::vector<primitive>& net,
+    std::vector<std::unordered_map<int, memory>>& net_args,
+    const memory& diff_dst_memory, const memory& src_memory,
+    const Eltwise& eltwise_fwd, algorithm activation, const float& alpha,
+    const float& beta) {
+    auto src_md = src_memory.get_desc();
+    diff_src_memory = memory(src_md, eng);
+
+    auto bwd_desc = eltwise_backward::desc(
+        activation, diff_src_memory.get_desc(), src_md, alpha, beta);
+    auto bwd_pd = eltwise_backward::primitive_desc(bwd_desc, eng,
+                                                   eltwise_fwd.prim_desc());
+
+    net.push_back(eltwise_backward(bwd_pd));
+    net_args.push_back({{DNNL_ARG_SRC, src_memory},
+                        {DNNL_ARG_DIFF_DST, diff_dst_memory},
+                        {DNNL_ARG_DIFF_SRC, diff_src_memory}});
+}
+
 MaxPooling_back::MaxPooling_back(
     engine eng, std::vector<primitive>& net,
     std::vector<std::unordered_map<int, memory>>& net_args,
@@ -417,6 +553,27 @@ MaxPooling_back::MaxPooling_back(
     net.push_back(pooling_backward(bwd_pd));
     net_args.push_back({{DNNL_ARG_DIFF_DST, diff_dst_memory},
                         {DNNL_ARG_WORKSPACE, pool_bwd.workspace_memory},
+                        {DNNL_ARG_DIFF_SRC, diff_src_memory}});
+}
+
+MeanPooling_back::MeanPooling_back(
+    engine eng, std::vector<primitive>& net,
+    std::vector<std::unordered_map<int, memory>>& net_args,
+    const memory::dims& kernel, const memory::dims& strides,
+    const memory::dims& padding, const memory& diff_dst_memory,
+    const memory& src_memory, const MeanPooling& pool_bwd,
+    algorithm algorithm_type) {
+
+    auto src_md = src_memory.get_desc();
+    diff_src_memory = memory(src_md, eng);
+    auto bwd_desc = pooling_backward::desc(
+        algorithm_type, diff_src_memory.get_desc(), diff_dst_memory.get_desc(),
+        strides, kernel, padding, padding);
+    auto bwd_pd =
+        pooling_backward::primitive_desc(bwd_desc, eng, pool_bwd.prim_desc());
+
+    net.push_back(pooling_backward(bwd_pd));
+    net_args.push_back({{DNNL_ARG_DIFF_DST, diff_dst_memory},
                         {DNNL_ARG_DIFF_SRC, diff_src_memory}});
 }
 
@@ -474,6 +631,195 @@ Conv2DwithReLu_back::Conv2DwithReLu_back(
 
     net.push_back(convolution_backward_data(conv_data_bwd_pd));
     net_args.push_back({{DNNL_ARG_DIFF_DST, diff_relu_src_memory},
+                        {DNNL_ARG_WEIGHTS, conv_fwd.weights_memory},
+                        {DNNL_ARG_DIFF_SRC, diff_src_memory}});
+}
+
+ReLU::ReLU(engine eng, std::vector<primitive>& net,
+           std::vector<std::unordered_map<int, memory>>& net_args,
+           const memory& src_memory, const float& negative_slope) {
+    auto desc = dnnl::eltwise_forward::desc(
+        dnnl::prop_kind::forward_training, algorithm::eltwise_relu,
+        src_memory.get_desc(), negative_slope);
+    auto pd = dnnl::eltwise_forward::primitive_desc(desc, eng);
+
+    // create relu dst memory
+    auto dst_memory = memory(pd.dst_desc(), eng);
+
+    net.push_back(dnnl::eltwise_forward(pd));
+    net_args.push_back(
+        {{DNNL_ARG_SRC, src_memory}, {DNNL_ARG_DST, dst_memory}});
+    dst_m = dst_memory;
+    pd_m = pd;
+}
+
+Eltwise::Eltwise(engine eng, std::vector<primitive>& net,
+                 std::vector<std::unordered_map<int, memory>>& net_args,
+                 const memory& src_memory, algorithm activation,
+                 const float& alpha, const float& beta) {
+    auto desc = dnnl::eltwise_forward::desc(dnnl::prop_kind::forward_training,
+                                            activation, src_memory.get_desc(),
+                                            alpha, beta);
+    auto pd = dnnl::eltwise_forward::primitive_desc(desc, eng);
+
+    // create relu dst memory
+    auto dst_memory = memory(pd.dst_desc(), eng);
+
+    net.push_back(dnnl::eltwise_forward(pd));
+    net_args.push_back(
+        {{DNNL_ARG_SRC, src_memory}, {DNNL_ARG_DST, dst_memory}});
+    dst_m = dst_memory;
+    pd_m = pd;
+}
+
+Conv2DwithActi::Conv2DwithActi(
+    engine eng, std::vector<primitive>& net,
+    std::vector<std::unordered_map<int, memory>>& net_args,
+    const memory& src_memory, const memory::dims& src_tz,
+    const memory::dims& dst_tz, const memory::dims& weights_tz,
+    const memory::dims& strides, const memory::dims& padding,
+    algorithm activation, const float& alpha, const float& beta) {
+
+    std::vector<float> weights(product(weights_tz));
+    std::vector<float> bias(weights_tz.at(0));
+
+    std::default_random_engine generator(155);
+    std::normal_distribution<float> norm_dist(0.f, 1.f);
+
+    // initializing non-zero values for weights and bias
+    for (size_t i = 0; i < weights.size(); ++i)
+        weights[i] = norm_dist(generator);
+    for (size_t i = 0; i < bias.size(); ++i)
+        bias[i] = norm_dist(generator);
+
+    memory::dims bias_tz = {weights_tz[0]};
+
+#ifdef USEREORDER
+    auto user_weights_memory = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    write_to_dnnl_memory(weights.data(), user_weights_memory);
+    auto user_bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    write_to_dnnl_memory(bias.data(), user_bias_memory);
+#endif
+
+#ifndef USEREORDER
+    weights_memory = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    write_to_dnnl_memory(weights.data(), weights_memory);
+    bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+    write_to_dnnl_memory(bias.data(), bias_memory);
+#endif
+
+    auto src_md = memory::desc({src_tz}, dt::f32, tag::any);
+    auto bias_md = memory::desc({bias_tz}, dt::f32, tag::any);
+    auto weights_md = memory::desc({weights_tz}, dt::f32, tag::any);
+    auto dst_md = memory::desc({dst_tz}, dt::f32, tag::any);
+
+    auto desc = convolution_forward::desc(
+        prop_kind::forward, algorithm::convolution_direct, src_md, weights_md,
+        bias_md, dst_md, strides, padding, padding);
+    auto pd = convolution_forward::primitive_desc(desc, eng);
+
+#ifdef USEREORDER
+    // create reorder primitives between user input and conv src if needed
+    auto weights_memory = user_weights_memory;
+    if (pd.weights_desc() != user_weights_memory.get_desc()) {
+        weights_memory = memory(pd.weights_desc(), eng);
+        net.push_back(reorder(user_weights_memory, weights_memory));
+        net_args.push_back({{DNNL_ARG_FROM, user_weights_memory},
+                            {DNNL_ARG_TO, weights_memory}});
+    }
+
+    // added by rbj (159 modified as well)
+    auto bias_memory = user_bias_memory;
+    if (pd.bias_desc() != user_bias_memory.get_desc()) {
+        bias_memory = memory(pd.bias_desc(), eng);
+        net.push_back(reorder(user_bias_memory, bias_memory));
+        net_args.push_back(
+            {{DNNL_ARG_FROM, user_bias_memory}, {DNNL_ARG_TO, bias_memory}});
+    }
+#endif
+
+    // create memory for conv dst
+    conv_dst_memory = memory(pd.dst_desc(), eng);
+
+    // finally create a convolution primitive
+    net.push_back(convolution_forward(pd));
+    net_args.push_back({{DNNL_ARG_SRC, src_memory},
+                        {DNNL_ARG_WEIGHTS, weights_memory},
+                        {DNNL_ARG_BIAS, bias_memory},
+                        {DNNL_ARG_DST, conv_dst_memory}});
+
+    // eltwise
+    auto eltwise_desc =
+        eltwise_forward::desc(prop_kind::forward_training, activation,
+                              conv_dst_memory.get_desc(), alpha, beta);
+    auto eltwise_pd = eltwise_forward::primitive_desc(eltwise_desc, eng);
+
+    // create eltwise dst memory
+    auto eltwise_dst_memory = memory(eltwise_pd.dst_desc(), eng);
+
+    net.push_back(eltwise_forward(eltwise_pd));
+    net_args.push_back(
+        {{DNNL_ARG_SRC, conv_dst_memory}, {DNNL_ARG_DST, eltwise_dst_memory}});
+    dst_m = eltwise_dst_memory;
+    pd1_m = pd;
+    pd2_m = eltwise_pd;
+}
+
+Conv2DwithActi_back::Conv2DwithActi_back(
+    engine eng, std::vector<primitive>& net,
+    std::vector<std::unordered_map<int, memory>>& net_args,
+    const memory::dims& weights_tz, const memory::dims& strides,
+    const memory::dims& padding, const memory& diff_dst_memory,
+    const memory& src_memory, const Conv2DwithActi& conv_fwd,
+    algorithm activation, const float& alpha, const float& beta) {
+
+    // 1) eltwise back
+    auto eltwise_src_md = conv_fwd.conv_dst_memory.get_desc();
+    auto diff_eltwise_src_memory = memory(eltwise_src_md, eng);
+    auto diff_eltwise_src_md = diff_eltwise_src_memory.get_desc();
+
+    auto eltwise_bwd_desc = eltwise_backward::desc(
+        activation, diff_eltwise_src_md, eltwise_src_md, alpha, beta);
+    auto eltwise_bwd_pd = eltwise_backward::primitive_desc(
+        eltwise_bwd_desc, eng, conv_fwd.eltwise_pd());
+
+    net.push_back(eltwise_backward(eltwise_bwd_pd));
+    net_args.push_back({{DNNL_ARG_SRC, conv_fwd.conv_dst_memory},
+                        {DNNL_ARG_DIFF_DST, diff_dst_memory},
+                        {DNNL_ARG_DIFF_SRC, diff_eltwise_src_memory}});
+
+    // 2) convolution back (weights)
+    memory::dims bias_tz = {weights_tz[0]};
+
+    diff_weights_memory = memory({{weights_tz}, dt::f32, tag::oihw}, eng);
+    diff_bias_memory = memory({{bias_tz}, dt::f32, tag::x}, eng);
+
+    auto weights_md = memory::desc({weights_tz}, dt::f32, tag::any);
+
+    auto src_md = src_memory.get_desc();
+
+    auto conv_weights_bwd_desc = convolution_backward_weights::desc(
+        algorithm::convolution_direct, src_md, diff_weights_memory.get_desc(),
+        diff_eltwise_src_md, strides, padding, padding);
+    auto conv_weights_bwd_pd = convolution_backward_weights::primitive_desc(
+        conv_weights_bwd_desc, eng, conv_fwd.conv_pd());
+
+    net.push_back(convolution_backward_weights(conv_weights_bwd_pd));
+    net_args.push_back({{DNNL_ARG_DIFF_DST, diff_eltwise_src_memory},
+                        {DNNL_ARG_SRC, src_memory},
+                        {DNNL_ARG_DIFF_WEIGHTS, diff_weights_memory},
+                        {DNNL_ARG_DIFF_BIAS, diff_bias_memory}});
+
+    diff_src_memory = memory(src_md, eng);
+
+    auto conv_data_bwd_desc = convolution_backward_data::desc(
+        algorithm::convolution_direct, diff_src_memory.get_desc(), weights_md,
+        diff_eltwise_src_md, strides, padding, padding);
+    auto conv_data_bwd_pd = convolution_backward_data::primitive_desc(
+        conv_data_bwd_desc, eng, conv_fwd.conv_pd());
+
+    net.push_back(convolution_backward_data(conv_data_bwd_pd));
+    net_args.push_back({{DNNL_ARG_DIFF_DST, diff_eltwise_src_memory},
                         {DNNL_ARG_WEIGHTS, conv_fwd.weights_memory},
                         {DNNL_ARG_DIFF_SRC, diff_src_memory}});
 }
