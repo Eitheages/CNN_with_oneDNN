@@ -522,6 +522,7 @@ Eltwise_back::Eltwise_back(
     const memory& diff_dst_memory, const memory& src_memory,
     const Eltwise& eltwise_fwd, algorithm activation, const float& alpha,
     const float& beta) {
+
     auto src_md = src_memory.get_desc();
     diff_src_memory = memory(src_md, eng);
 
@@ -812,6 +813,7 @@ Conv2DwithActi_back::Conv2DwithActi_back(
 
     diff_src_memory = memory(src_md, eng);
 
+    // 3) convolution back (data)
     auto conv_data_bwd_desc = convolution_backward_data::desc(
         algorithm::convolution_direct, diff_src_memory.get_desc(), weights_md,
         diff_eltwise_src_md, strides, padding, padding);
@@ -822,6 +824,7 @@ Conv2DwithActi_back::Conv2DwithActi_back(
     net_args.push_back({{DNNL_ARG_DIFF_DST, diff_eltwise_src_memory},
                         {DNNL_ARG_WEIGHTS, conv_fwd.weights_memory},
                         {DNNL_ARG_DIFF_SRC, diff_src_memory}});
+
 }
 
 #endif

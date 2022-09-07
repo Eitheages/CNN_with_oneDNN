@@ -1,6 +1,6 @@
 #include <opencv2/opencv.hpp>
 #include "mnist/mnist_reader.hpp"
-#include "my_layers.hpp"
+#include "new_layers.hpp"
 
 // #define DEBUG
 
@@ -15,10 +15,10 @@ mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
         MNIST_DATA_LOCATION, 0, 40);
 
 // hyper parameter
-const int N = 8;  // batch_size
+const int N = 16;  // batch_size
 const int step = 50;
-const float LearningRate = 1;
-const int epoch = 10;
+const float LearningRate = 0.1;
+const int epoch = 30;
 
 void LeNet(engine::kind engine_kind) {
     // Vectors of input data and expected output
@@ -39,94 +39,49 @@ void LeNet(engine::kind engine_kind) {
     // {batch, 1, 28, 28} (x) {6, 1, 5, 5} -> {batch, 6, 28, 28}
     // padding = "same"
     memory::dims conv1_src_tz = {N, 1, 28, 28};
-    memory::dims conv1_weights_tz = {6, 1, 5, 5};
-    memory::dims conv1_dst_tz = {N, 6, 28, 28};
-    memory::dims conv1_strides = {1, 1};
-    memory::dims conv1_padding = {2, 2};
 
     auto conv1_src_memory = memory({{conv1_src_tz}, dt::f32, tag::nchw}, eng);
 
-    Conv2DwithActi conv1(eng, net_fwd, net_fwd_args, conv1_src_memory,
-                         conv1_src_tz, conv1_dst_tz, conv1_weights_tz,
-                         conv1_strides, conv1_padding,
-                         algorithm::eltwise_logistic);
-    memory conv1_dst_memory = conv1.dst_memory();
+    Conv2D conv1(N, 28, 6, 5, 1, 2, 0, conv1_src_memory, net_fwd, net_fwd_args,
+                 eng);
+    Eltwise sigmoid1(algorithm::eltwise_logistic, 0.f, 0.f, conv1.arg_dst,
+                     net_fwd, net_fwd_args, eng);
 
     // LeNet pool1
     // {batch, 6, 28, 28} -> {batch, 6, 14, 14}
     // kernel = {2, 2}, strides = {2, 2}, padding = "valid"
-    memory::dims pool1_dst_tz = {N, 6, 14, 14};
-    memory::dims pool1_kernel = {2, 2};
-    memory::dims pool1_strides = {2, 2};
-    memory::dims pool1_padding = {0, 0};
 
-    MeanPooling pool1(eng, net_fwd, net_fwd_args, conv1_dst_memory,
-                      pool1_kernel, pool1_dst_tz, pool1_strides, pool1_padding,
-                      algorithm::pooling_avg_include_padding);
-    memory pool1_dst_memory = pool1.dst_memory();
+    MaxPool2D pool1(2, 2, sigmoid1.arg_dst, net_fwd, net_fwd_args, eng);
 
     // LeNet conv2
     // {batch, 6, 14, 14} (x) {16, 6, 5, 5} -> {batch, 16, 10, 10}
     // padding = "valid"
-    memory::dims conv2_src_tz = {N, 6, 14, 14};
-    memory::dims conv2_weights_tz = {16, 6, 5, 5};
-    memory::dims conv2_dst_tz = {N, 16, 10, 10};
-    memory::dims conv2_strides = {1, 1};
-    memory::dims conv2_padding = {0, 0};
-
-    Conv2DwithActi conv2(eng, net_fwd, net_fwd_args, pool1_dst_memory,
-                         conv2_src_tz, conv2_dst_tz, conv2_weights_tz,
-                         conv2_strides, conv2_padding,
-                         algorithm::eltwise_logistic);
-    memory conv2_dst_memory = conv2.dst_memory();
+    Conv2D conv2(N, 10, 16, 5, 1, 0, 0, pool1.arg_dst, net_fwd, net_fwd_args,
+                 eng);
+    Eltwise sigmoid2(algorithm::eltwise_logistic, 0.f, 0.f, conv2.arg_dst,
+                     net_fwd, net_fwd_args, eng);
 
     // LeNet pool2
     // {batch, 16, 10, 10} -> {batch, 16, 5, 5}
     // kernel = {2, 2}, strides = {2, 2}, padding = "valid"
-    memory::dims pool2_dst_tz = {N, 16, 5, 5};
-    memory::dims pool2_kernel = {2, 2};
-    memory::dims pool2_strides = {2, 2};
-    memory::dims pool2_padding = {0, 0};
 
-    MeanPooling pool2(eng, net_fwd, net_fwd_args, conv2_dst_memory,
-                      pool2_kernel, pool2_dst_tz, pool2_strides, pool2_padding,
-                      algorithm::pooling_avg_include_padding);
-    memory pool2_dst_memory = pool2.dst_memory();
+    MaxPool2D pool2(2, 2, sigmoid2.arg_dst, net_fwd, net_fwd_args, eng);
 
     // LeNet fc1
     // {batch, 16, 5, 5} -> {batch, 120}
-    memory::dims fc1_src_tz = {N, 16, 5, 5};
-    memory::dims fc1_weights_tz = {120, 16, 5, 5};
-    memory::dims fc1_dst_tz = {N, 120};
-    Dense fc1(eng, net_fwd, net_fwd_args, pool2_dst_memory, fc1_src_tz,
-              fc1_dst_tz, fc1_weights_tz);
-    memory fc1_dst_memory = fc1.dst_memory();
-
-    Eltwise fc1_sig(eng, net_fwd, net_fwd_args, fc1_dst_memory,
-                    algorithm::eltwise_logistic);
-    memory fc1_sig_dst_memory = fc1_sig.dst_memory();
+    Dense fc1(120, pool2.arg_dst, net_fwd, net_fwd_args, eng);
+    Eltwise sigmoid3(algorithm::eltwise_logistic, 0.f, 0.f, fc1.arg_dst,
+                     net_fwd, net_fwd_args, eng);
 
     // LeNet fc2
     // {batch, 120} -> {batch, 84}
-    memory::dims fc2_src_tz = {N, 120};
-    memory::dims fc2_weights_tz = {84, 120};
-    memory::dims fc2_dst_tz = {N, 84};
-    Dense fc2(eng, net_fwd, net_fwd_args, fc1_sig_dst_memory, fc2_src_tz,
-              fc2_dst_tz, fc2_weights_tz);
-    memory fc2_dst_memory = fc2.dst_memory();
-
-    Eltwise fc2_sig(eng, net_fwd, net_fwd_args, fc2_dst_memory,
-                    algorithm::eltwise_logistic);
-    memory fc2_sig_dst_memory = fc2_sig.dst_memory();
+    Dense fc2(84, sigmoid3.arg_dst, net_fwd, net_fwd_args, eng);
+    Eltwise sigmoid4(algorithm::eltwise_logistic, 0.f, 0.f, fc2.arg_dst,
+                     net_fwd, net_fwd_args, eng);
 
     // LeNet fc3
     // {batch, 84} -> {batch, 10}
-    memory::dims fc3_src_tz = {N, 84};
-    memory::dims fc3_weights_tz = {10, 84};
-    memory::dims fc3_dst_tz = {N, 10};
-    Dense fc3(eng, net_fwd, net_fwd_args, fc2_sig_dst_memory, fc3_src_tz,
-              fc3_dst_tz, fc3_weights_tz);
-    memory fc3_dst_memory = fc3.dst_memory();
+    Dense fc3(10, sigmoid4.arg_dst, net_fwd, net_fwd_args, eng);
 
     // LeNet softmax
     memory::dims softmax_src_tz = {N, 10};
@@ -138,7 +93,7 @@ void LeNet(engine::kind engine_kind) {
 
     net_fwd.push_back(softmax_forward(softmax_pd));
     net_fwd_args.push_back(
-        {{DNNL_ARG_SRC, fc3_dst_memory}, {DNNL_ARG_DST, softmax_dst_memory}});
+        {{DNNL_ARG_SRC, fc3.arg_dst}, {DNNL_ARG_DST, softmax_dst_memory}});
 
     memory::dims y_tz = {N, 10};
 
@@ -194,75 +149,84 @@ void LeNet(engine::kind engine_kind) {
     //                         {DNNL_ARG_DIFF_SRC, softmax_diff_src_memory}});
 
     // fc3 back
-    Dense_back fc3_back(eng, net_bwd, net_bwd_args, diff_softmax_src_memory,
-                        fc2_sig_dst_memory, fc3_weights_tz, fc3);
+    Dense_back_data fc3_back_data(diff_softmax_src_memory, fc3, net_bwd,
+                                  net_bwd_args, eng);
 
     // fc2 sigmoid back
-    Eltwise_back fc2_sig_back(eng, net_bwd, net_bwd_args,
-                              fc3_back.diff_src_memory, fc2_dst_memory, fc2_sig,
-                              algorithm::eltwise_logistic);
+    Eltwise_back sigmoid4_back(algorithm::eltwise_logistic, 0.f, 0.f, sigmoid4,
+                               fc3_back_data.arg_diff_src, net_bwd,
+                               net_bwd_args, eng);
 
     // fc2 back
-    Dense_back fc2_back(eng, net_bwd, net_bwd_args,
-                        fc2_sig_back.diff_src_memory, fc1_sig_dst_memory,
-                        fc2_weights_tz, fc2);
+    Dense_back_data fc2_back_data(sigmoid4_back.arg_diff_src, fc2, net_bwd,
+                                  net_bwd_args, eng);
 
     // fc1 sigmoid back
-    Eltwise_back fc1_sig_back(eng, net_bwd, net_bwd_args,
-                              fc2_back.diff_src_memory, fc1_dst_memory, fc1_sig,
-                              algorithm::eltwise_logistic);
+    Eltwise_back sigmoid3_back(algorithm::eltwise_logistic, 0.f, 0.f, sigmoid3,
+                               fc2_back_data.arg_diff_src, net_bwd,
+                               net_bwd_args, eng);
 
     // fc1 back
-    Dense_back fc1_back(eng, net_bwd, net_bwd_args,
-                        fc1_sig_back.diff_src_memory, pool2_dst_memory,
-                        fc1_weights_tz, fc1);
+    Dense_back_data fc1_back_data(sigmoid3_back.arg_diff_src, fc1, net_bwd,
+                                  net_bwd_args, eng);
 
     // pool2 back
-    MeanPooling_back pool2_back(eng, net_bwd, net_bwd_args, pool2_kernel,
-                                pool2_strides, pool2_padding,
-                                fc1_back.diff_src_memory, conv2_dst_memory,
-                                pool2, algorithm::pooling_avg_include_padding);
+    MaxPool2D_back pool2_back(2, 2, pool2, fc1_back_data.arg_diff_src, net_bwd,
+                              net_bwd_args, eng);
 
     // conv2 back
-    Conv2DwithActi_back conv2_back(eng, net_bwd, net_bwd_args, conv2_weights_tz,
-                                   conv2_strides, conv2_padding,
-                                   pool2_back.diff_src_memory, pool1_dst_memory,
-                                   conv2, algorithm::eltwise_logistic);
+    Eltwise_back sigmoid2_back(algorithm::eltwise_logistic, 0.f, 0.f, sigmoid2,
+                               pool2_back.arg_diff_src, net_bwd, net_bwd_args,
+                               eng);
+
+    Conv2D_back_data conv2_back_data(sigmoid2_back.arg_diff_src, conv2, 1, 0, 0,
+                                     net_bwd, net_bwd_args, eng);
 
     // pool1 back
-    MeanPooling_back pool1_back(eng, net_bwd, net_bwd_args, pool1_kernel,
-                                pool1_strides, pool1_padding,
-                                fc1_back.diff_src_memory, conv2_dst_memory,
-                                pool1, algorithm::pooling_avg_include_padding);
+    MaxPool2D_back pool1_back(2, 2, pool1, conv2_back_data.arg_diff_src,
+                              net_bwd, net_bwd_args, eng);
 
     // conv1 back
-    Conv2DwithActi_back conv1_back(eng, net_bwd, net_bwd_args, conv1_weights_tz,
-                                   conv1_strides, conv1_padding,
-                                   pool1_back.diff_src_memory, conv1_src_memory,
-                                   conv1, algorithm::eltwise_logistic);
+    Eltwise_back sigmoid1_back(algorithm::eltwise_logistic, 0.f, 0.f, sigmoid1,
+                               pool1_back.arg_diff_src, net_bwd, net_bwd_args,
+                               eng);
+
+    Conv2D_back_data conv1_back_data(sigmoid1_back.arg_diff_src, conv1, 1, 2, 0,
+                                     net_bwd, net_bwd_args, eng);
 
     //-----------------------------------------------------------------------
     //----------------- Weights update -------------------------------------
-    updateWeights_SGD(conv1.weights_memory, conv1_back.diff_weights_memory,
+    Conv2D_back_weights conv1_back_weights(sigmoid1_back.arg_diff_src, conv1, 1,
+                                           2, 0, net_sgd, net_sgd_args, eng);
+    Conv2D_back_weights conv2_back_weights(sigmoid2_back.arg_diff_src, conv2, 1,
+                                           0, 0, net_sgd, net_sgd_args, eng);
+    Dense_back_weights fc1_back_weights(sigmoid3_back.arg_diff_src, fc1,
+                                        net_sgd, net_sgd_args, eng);
+    Dense_back_weights fc2_back_weights(sigmoid4_back.arg_diff_src, fc2, net_bwd,
+                                  net_bwd_args, eng);
+    Dense_back_weights fc3_back_weights(diff_softmax_src_memory, fc3, net_bwd,
+                                  net_bwd_args, eng);
+
+    updateWeights_SGD(conv1.arg_weights, conv1_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(conv2.weights_memory, conv2_back.diff_weights_memory,
+    updateWeights_SGD(conv2.arg_weights, conv2_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc1.weights_memory, fc1_back.diff_weights_memory,
+    updateWeights_SGD(fc1.arg_weights, fc1_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc2.weights_memory, fc2_back.diff_weights_memory,
+    updateWeights_SGD(fc2.arg_weights, fc2_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc3.weights_memory, fc3_back.diff_weights_memory,
+    updateWeights_SGD(fc3.arg_weights, fc3_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
 
-    updateWeights_SGD(conv1.bias_memory, conv1_back.diff_bias_memory,
+    updateWeights_SGD(conv1.arg_bias, conv1_back_weights.arg_diff_bias,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(conv2.bias_memory, conv2_back.diff_bias_memory,
+    updateWeights_SGD(conv2.arg_bias, conv2_back_weights.arg_diff_bias,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc1.bias_memory, fc1_back.diff_bias_memory, LearningRate,
+    updateWeights_SGD(fc1.arg_bias, fc1_back_weights.arg_diff_bias, LearningRate,
                       net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc2.bias_memory, fc2_back.diff_bias_memory, LearningRate,
+    updateWeights_SGD(fc2.arg_bias, fc2_back_weights.arg_diff_bias, LearningRate,
                       net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc3.bias_memory, fc3_back.diff_bias_memory, LearningRate,
+    updateWeights_SGD(fc3.arg_bias, fc3_back_weights.arg_diff_bias, LearningRate,
                       net_sgd, net_sgd_args, eng);
 
     // data index
@@ -319,7 +283,7 @@ void LeNet(engine::kind engine_kind) {
                 }
                 crossEntropy += y_hat_logged[j] * net_dst[j];
                 diff_softmax_src[j] =
-                    (y_hat[j] - net_dst[j]);  // maybe N is not neccessary
+                    (y_hat[j] - net_dst[j]);  // maybe divided by N is not neccessary
             }
             crossEntropy /= (float)(-N);
             entropy[g] = crossEntropy;
@@ -335,7 +299,7 @@ void LeNet(engine::kind engine_kind) {
                 net_sgd.at(i).execute(s, net_sgd_args.at(i));
 
             //[debug]
-            auto check_memory = conv1_back.diff_weights_memory;
+            auto check_memory = conv1_back_weights.arg_diff_weights;
             std::vector<float> check_data(
                 product(check_memory.get_desc().dims()));
             read_from_dnnl_memory(check_data.data(), check_memory);

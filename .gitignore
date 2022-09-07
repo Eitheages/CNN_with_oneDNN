@@ -4,6 +4,8 @@
 
 example
 my_layers.cpp
+my_layers.hpp
+LeNet.cpp
 
 # Prerequisites
 *.d
