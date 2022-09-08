@@ -85,6 +85,28 @@ public:
 private:
 };
 
+class MeanPool2D {
+public:
+    dnnl::memory arg_src, arg_dst;
+    dnnl::pooling_forward::primitive_desc* pooling_fwd_pd;
+    /**
+         * @brief Construct a new Mean Pool 2 D object
+         *
+         * @param kernel_size the size of the kernel
+         * @param stride_length the length of the stride
+         * @param input Input memory
+         * @param net This is the vector of primitives to which we will append the FC layer primitive
+         * @param net_args This is the associated map to which we will add the arguments of the primitive
+         * @param eng oneAPI engine that will host the primitive
+         */
+    MeanPool2D(int kernel_size, int stride_length, dnnl::memory input,
+               std::vector<dnnl::primitive>& net,
+               std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
+               dnnl::engine eng);
+
+private:
+};
+
 class Eltwise {
 public:
     dnnl::memory arg_src, arg_dst;
@@ -222,6 +244,29 @@ public:
                    dnnl::memory diff_dst_mem, std::vector<dnnl::primitive>& net,
                    std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
                    dnnl::engine eng);
+
+private:
+};
+
+class MeanPool2D_back {
+public:
+    dnnl::memory arg_diff_src, arg_diff_dst;
+    /**
+         * @brief Construct a new MeanPool2D_back object
+         *
+         * @param kernel_size the size of the kernel
+         * @param stride_length the stride length
+         * @param meanpool_fwd the MeanPool2D forward class
+         * @param diff_dst_mem The dnnl::memory object containing the gradient of the loss with respect to the output
+         * @param net The pipeline onto which the primitive will be appended
+         * @param net_args The arguments
+         * @param eng The oneAPI engine
+         */
+    MeanPool2D_back(
+        int kernel_size, int stride_length, MeanPool2D meanpool_fwd,
+        dnnl::memory diff_dst_mem, std::vector<dnnl::primitive>& net,
+        std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
+        dnnl::engine eng);
 
 private:
 };
@@ -680,29 +725,8 @@ MaxPool2D_back::MaxPool2D_back(
     dnnl::memory diff_dst_mem, std::vector<dnnl::primitive>& net,
     std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
     dnnl::engine eng) {
-    auto src_md = maxpool_fwd.arg_src.get_desc();
 
-    long batch = src_md.dims()[0];
-    long channels = src_md.dims()[1];
-    long input_height = src_md.dims()[2];
-    long input_width = src_md.dims()[3];
     long padding = 0;
-
-    const dnnl::memory::dim output_height =
-        (input_height - ((kernel_size - 1) * 1 + kernel_size) + padding +
-         padding) /
-            stride_length +
-        1;
-    const dnnl::memory::dim output_width =
-        (input_width - ((kernel_size - 1) * 1 + kernel_size) + padding +
-         padding) /
-            stride_length +
-        1;
-
-    // Source (src) and destination (dst) tensors dimensions.
-    dnnl::memory::dims src_dims = {batch, channels, input_height, input_width};
-    dnnl::memory::dims dst_dims = {batch, channels, output_height,
-                                   output_width};
 
     // Kernel dimensions.
     dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
@@ -710,7 +734,6 @@ MaxPool2D_back::MaxPool2D_back(
     dnnl::memory::dims strides_dims = {stride_length, stride_length};
     dnnl::memory::dims padding_dims_l = {padding, padding};
     dnnl::memory::dims padding_dims_r = {padding, padding};
-    dnnl::memory::dims dilation = {1, 1};
 
     auto diff_dst_md = maxpool_fwd.arg_dst.get_desc();
     auto diff_src_md = maxpool_fwd.arg_src.get_desc();
@@ -720,11 +743,11 @@ MaxPool2D_back::MaxPool2D_back(
     // Create descriptor.
     auto pooling_bwd_desc = dnnl::pooling_backward::desc(
         dnnl::algorithm::pooling_max, diff_src_md, diff_dst_md, strides_dims,
-        kernel_dims,  padding_dims_l, padding_dims_r);
+        kernel_dims, padding_dims_l, padding_dims_r);
     auto pooling_fwd_desc = dnnl::pooling_forward::desc(
         dnnl::prop_kind::forward_training, dnnl::algorithm::pooling_max,
-        diff_src_md, diff_dst_md, strides_dims, kernel_dims,
-        padding_dims_l, padding_dims_r);
+        diff_src_md, diff_dst_md, strides_dims, kernel_dims, padding_dims_l,
+        padding_dims_r);
     auto pooling_fwd_pd =
         dnnl::pooling_forward::primitive_desc(pooling_fwd_desc, eng);
     std::cout << "Created descriptor\n";
@@ -924,9 +947,8 @@ Conv2D_back_weights::Conv2D_back_weights(
     std::cout << "Recreating Convolutional layer primitive descriptor\n";
     auto conv_fwd_desc = dnnl::convolution_forward::desc(
         dnnl::prop_kind::forward, dnnl::algorithm::convolution_direct,
-        conv_bwd_src_md, conv_diff_weights_md,
-        conv_fwd_dst_md, conv_strides, conv_padding,
-        conv_padding);
+        conv_bwd_src_md, conv_diff_weights_md, conv_fwd_dst_md, conv_strides,
+        conv_padding, conv_padding);
     std::cout << "Settings post-ops\n";
 
     auto conv_fwd_pd =
@@ -1077,6 +1099,100 @@ Eltwise::Eltwise(dnnl::algorithm activation, float alpha, float beta,
 
     net.push_back(dnnl::eltwise_forward(eltwise_pd));
     net_args.push_back({{DNNL_ARG_SRC, input}, {DNNL_ARG_DST, dst_mem}});
+}
+
+MeanPool2D::MeanPool2D(
+    int kernel_size, int stride_length, dnnl::memory input,
+    std::vector<dnnl::primitive>& net,
+    std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
+    dnnl::engine eng) {
+
+    auto src_md = input.get_desc();
+
+    long batch = src_md.dims()[0];
+    long channels = src_md.dims()[1];
+    long input_height = src_md.dims()[2];
+    long input_width = src_md.dims()[3];
+    long padding = 0;
+
+    const dnnl::memory::dim output_height =
+        (input_height - kernel_size + padding + padding) / stride_length + 1;
+    const dnnl::memory::dim output_width =
+        (input_height - kernel_size + padding + padding) / stride_length + 1;
+
+    // Source (src) and destination (dst) tensors dimensions.
+    dnnl::memory::dims src_dims = {batch, channels, input_height, input_width};
+    dnnl::memory::dims dst_dims = {batch, channels, output_height,
+                                   output_width};
+
+    // Kernel dimensions.
+    dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
+    // Strides, padding dimensions.
+    dnnl::memory::dims strides_dims = {stride_length, stride_length};
+    dnnl::memory::dims padding_dims_l = {padding, padding};
+    dnnl::memory::dims padding_dims_r = {padding, padding};
+
+    auto dst_md = dnnl::memory::desc(dst_dims, dt::f32, tag::nchw);
+    auto dst_mem = dnnl::memory(dst_md, eng);
+    std::cout << "Allocated DST MEM\n";
+
+    // Create descriptor.
+    auto pooling_desc = dnnl::pooling_forward::desc(
+        dnnl::prop_kind::forward_training,
+        dnnl::algorithm::pooling_avg_exclude_padding, src_md, dst_md,
+        strides_dims, kernel_dims, padding_dims_l, padding_dims_r);
+    auto pooling_pd = dnnl::pooling_forward::primitive_desc(pooling_desc, eng);
+    std::cout << "Allocated primitive\n";
+
+    arg_src = input;
+    arg_dst = dst_mem;
+    pooling_fwd_pd = &pooling_pd;
+
+    net.push_back(dnnl::pooling_forward(pooling_pd));
+    net_args.push_back({{DNNL_ARG_SRC, input}, {DNNL_ARG_DST, dst_mem}});
+}
+
+MeanPool2D_back::MeanPool2D_back(
+    int kernel_size, int stride_length, MeanPool2D meanpool_fwd,
+    dnnl::memory diff_dst_mem, std::vector<dnnl::primitive>& net,
+    std::vector<std::unordered_map<int, dnnl::memory>>& net_args,
+    dnnl::engine eng) {
+
+    long padding = 0;
+
+    // Kernel dimensions.
+    dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
+    // Strides, padding dimensions.
+    dnnl::memory::dims strides_dims = {stride_length, stride_length};
+    dnnl::memory::dims padding_dims_l = {padding, padding};
+    dnnl::memory::dims padding_dims_r = {padding, padding};
+
+    auto diff_dst_md = meanpool_fwd.arg_dst.get_desc();
+    auto diff_src_md = meanpool_fwd.arg_src.get_desc();
+    auto diff_src_mem = dnnl::memory(diff_src_md, eng);
+    std::cout << "Memory allocated\n";
+
+    // Create descriptor.
+    auto pooling_bwd_desc = dnnl::pooling_backward::desc(
+        dnnl::algorithm::pooling_max, diff_src_md, diff_dst_md, strides_dims,
+        kernel_dims, padding_dims_l, padding_dims_r);
+    auto pooling_fwd_desc = dnnl::pooling_forward::desc(
+        dnnl::prop_kind::forward_training, dnnl::algorithm::pooling_avg_exclude_padding,
+        diff_src_md, diff_dst_md, strides_dims, kernel_dims, padding_dims_l,
+        padding_dims_r);
+    auto pooling_fwd_pd =
+        dnnl::pooling_forward::primitive_desc(pooling_fwd_desc, eng);
+    std::cout << "Created descriptor\n";
+    auto pooling_pd = dnnl::pooling_backward::primitive_desc(
+        pooling_bwd_desc, eng, pooling_fwd_pd);
+    std::cout << "Created primitive descriptor\n";
+
+    arg_diff_src = diff_src_mem;
+    arg_diff_dst = diff_dst_mem;
+
+    net.push_back(dnnl::pooling_backward(pooling_pd));
+    net_args.push_back({{DNNL_ARG_DIFF_SRC, diff_src_mem},
+                        {DNNL_ARG_DIFF_DST, diff_dst_mem}});
 }
 
 #endif

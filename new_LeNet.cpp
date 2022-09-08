@@ -17,7 +17,8 @@ mnist::MNIST_dataset<std::vector, std::vector<uint8_t>, uint8_t> dataset =
 // hyper parameter
 const int N = 16;  // batch_size
 const int step = 50;
-const float LearningRate = 0.1;
+float LearningRate =
+    0.1;  // replace with a lower number after serveral training
 const int epoch = 40;
 
 void LeNet(engine::kind engine_kind) {
@@ -202,10 +203,10 @@ void LeNet(engine::kind engine_kind) {
                                            0, 0, net_sgd, net_sgd_args, eng);
     Dense_back_weights fc1_back_weights(sigmoid3_back.arg_diff_src, fc1,
                                         net_sgd, net_sgd_args, eng);
-    Dense_back_weights fc2_back_weights(sigmoid4_back.arg_diff_src, fc2, net_bwd,
-                                  net_bwd_args, eng);
+    Dense_back_weights fc2_back_weights(sigmoid4_back.arg_diff_src, fc2,
+                                        net_bwd, net_bwd_args, eng);
     Dense_back_weights fc3_back_weights(diff_softmax_src_memory, fc3, net_bwd,
-                                  net_bwd_args, eng);
+                                        net_bwd_args, eng);
 
     updateWeights_SGD(conv1.arg_weights, conv1_back_weights.arg_diff_weights,
                       LearningRate, net_sgd, net_sgd_args, eng);
@@ -222,12 +223,12 @@ void LeNet(engine::kind engine_kind) {
                       LearningRate, net_sgd, net_sgd_args, eng);
     updateWeights_SGD(conv2.arg_bias, conv2_back_weights.arg_diff_bias,
                       LearningRate, net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc1.arg_bias, fc1_back_weights.arg_diff_bias, LearningRate,
-                      net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc2.arg_bias, fc2_back_weights.arg_diff_bias, LearningRate,
-                      net_sgd, net_sgd_args, eng);
-    updateWeights_SGD(fc3.arg_bias, fc3_back_weights.arg_diff_bias, LearningRate,
-                      net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc1.arg_bias, fc1_back_weights.arg_diff_bias,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc2.arg_bias, fc2_back_weights.arg_diff_bias,
+                      LearningRate, net_sgd, net_sgd_args, eng);
+    updateWeights_SGD(fc3.arg_bias, fc3_back_weights.arg_diff_bias,
+                      LearningRate, net_sgd, net_sgd_args, eng);
 
     // data index
 
@@ -236,6 +237,8 @@ void LeNet(engine::kind engine_kind) {
     std::vector<float> loss(epoch);
 
     for (size_t k = 0; k < epoch; ++k) {
+        if ((k + 1) % 10 == 0) // update date learning rate every 10 training
+            LearningRate /= 2;
         std::cout << k + 1 << " th training..." << std::endl;
         int train_t = 0;
         int test_t = 0;
